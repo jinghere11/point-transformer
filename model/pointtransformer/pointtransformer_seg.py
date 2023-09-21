@@ -31,7 +31,8 @@ class PointTransformerLayer(nn.Module):
         w = x_k - x_q.unsqueeze(1) + p_r.view(p_r.shape[0], p_r.shape[1], self.out_planes // self.mid_planes, self.mid_planes).sum(2)  # (n, nsample, c)
         for i, layer in enumerate(self.linear_w): w = layer(w.transpose(1, 2).contiguous()).transpose(1, 2).contiguous() if i % 3 == 0 else layer(w)
         w = self.softmax(w)  # (n, nsample, c)
-        n, nsample, c = x_v.shape; s = self.share_planes
+        n, nsample, c = x_v.shape
+        s = self.share_planes
         x = ((x_v + p_r).view(n, nsample, s, c // s) * w.unsqueeze(2)).sum(1).view(n, c)
         return x
 
@@ -64,6 +65,10 @@ class TransitionDown(nn.Module):
             p, o = n_p, n_o
         else:
             x = self.relu(self.bn(self.linear(x)))  # (n, c)
+        # print("p.shape = ", p.shape)
+        # print("x.shape = ", x.shape)
+        # print("o = ", o)
+
         return [p, x, o]
 
 
@@ -87,7 +92,11 @@ class TransitionUp(nn.Module):
                 else:
                     s_i, e_i, cnt = o[i-1], o[i], o[i] - o[i-1]
                 x_b = x[s_i:e_i, :]
-                x_b = torch.cat((x_b, self.linear2(x_b.sum(0, True) / cnt).repeat(cnt, 1)), 1)
+                try:
+                    x_b = torch.cat((x_b, self.linear2(x_b.sum(0, True) / cnt).repeat(cnt, 1)), 1)
+                except:
+                    import pdb
+                    pdb.set_trace()
                 x_tmp.append(x_b)
             x = torch.cat(x_tmp, 0)
             x = self.linear1(x)
@@ -128,6 +137,7 @@ class PointTransformerSeg(nn.Module):
         self.in_planes, planes = c, [32, 64, 128, 256, 512]
         fpn_planes, fpnhead_planes, share_planes = 128, 64, 8
         stride, nsample = [1, 4, 4, 4, 4], [8, 16, 16, 16, 16]
+        # stride, nsample = [1, 1, 1, 1, 1], [8, 16, 16, 16, 16]
         self.enc1 = self._make_enc(block, planes[0], blocks[0], share_planes, stride=stride[0], nsample=nsample[0])  # N/1
         self.enc2 = self._make_enc(block, planes[1], blocks[1], share_planes, stride=stride[1], nsample=nsample[1])  # N/4
         self.enc3 = self._make_enc(block, planes[2], blocks[2], share_planes, stride=stride[2], nsample=nsample[2])  # N/16
@@ -158,12 +168,16 @@ class PointTransformerSeg(nn.Module):
 
     def forward(self, pxo):
         p0, x0, o0 = pxo  # (n, 3), (n, c), (b)
+
         x0 = p0 if self.c == 3 else torch.cat((p0, x0), 1)
+        # print("self.c = ", self.c)
+        # print("x0.shape = ", x0.shape)
         p1, x1, o1 = self.enc1([p0, x0, o0])
         p2, x2, o2 = self.enc2([p1, x1, o1])
         p3, x3, o3 = self.enc3([p2, x2, o2])
         p4, x4, o4 = self.enc4([p3, x3, o3])
         p5, x5, o5 = self.enc5([p4, x4, o4])
+
         x5 = self.dec5[1:]([p5, self.dec5[0]([p5, x5, o5]), o5])[1]
         x4 = self.dec4[1:]([p4, self.dec4[0]([p4, x4, o4], [p5, x5, o5]), o4])[1]
         x3 = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4, o4]), o3])[1]

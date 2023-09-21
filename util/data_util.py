@@ -3,8 +3,57 @@ import random
 import SharedArray as SA
 
 import torch
+import torch.nn.functional as F
 
 from util.voxelize import voxelize
+
+from nilearn import surface
+import nibabel as nib
+
+def small2small(small_label, hemisphere):
+
+    small_label[small_label == -1] = 0
+    if hemisphere == 'L':
+        small_label = (small_label+1)//2
+    elif hemisphere == 'R':
+        small_label = small_label//2
+    return np.array(small_label)
+
+def meshto32klabel(meshlabel, hemisphere, trans=True):
+    file = "/nfs2/users/zj/v1/Brainnetome/fsaverage.{}.BN_Atlas.10k_fsaverage.label.gii".format(hemisphere)
+    label_model = surface.load_surf_data(file)
+    label = np.zeros(len(label_model))
+    if trans:
+        if hemisphere == 'R':
+            meshlabel = meshlabel*2
+        elif hemisphere == 'L':
+            meshlabel = meshlabel*2-1
+            meshlabel[meshlabel==-1] = 0
+    path = "/nfs2/users/zj/v1/Brainnetome/metric_index_{}_fsaverage10k.txt".format(hemisphere)
+    select_ind = np.loadtxt(path).astype(int)
+    label[select_ind] = meshlabel
+    return label
+
+def saveGiiLabel(data, hemisphere, savepath):
+    '''
+    save data as gii format
+    template_path: the path template
+    the length of data is not required same to the template but should match the relevent surface points' size
+    path and save_name is the saving location of gii file
+    '''
+ 
+    # BNA
+    label = meshto32klabel(data, hemisphere, trans=True).astype('int32')
+    template_path = "/nfs2/users/zj/v1/Brainnetome/fsaverage.{}.BN_Atlas.10k_fsaverage.label.gii".format(hemisphere)
+
+    # # scheafer
+    # label = np.zeros(len(original_label.get_fdata()))
+    original_label = nib.load(template_path)
+    a = nib.gifti.gifti.GiftiDataArray(label.astype('int32'),intent='NIFTI_INTENT_LABEL')
+    new_label = nib.gifti.gifti.GiftiImage( meta = original_label.meta, labeltable = original_label.labeltable)
+    new_label.add_gifti_data_array(a)
+    nib.save(new_label, savepath)
+    return None
 
 
 def sa_create(name, var):
@@ -23,18 +72,28 @@ def collate_fn(batch):
     return torch.cat(coord), torch.cat(feat), torch.cat(label), torch.IntTensor(offset)
 
 
+def data_sparse(x, k = 0.8):      #L:9391 R:9409
+    topk, indices = x.topk(k = int(k * x.shape[1]), dim = 1)
+    res = torch.autograd.Variable(0*x)
+    res = res.scatter(1,indices,topk)
+    # print("x.shape = ", x.size())
+    # print("res.shape = ", res.size())
+    return res
+
+
 def data_prepare(coord, feat, label, split='train', voxel_size=0.04, voxel_max=None, transform=None, shuffle_index=False):
+
     if transform:
         coord, feat, label = transform(coord, feat, label)
-    if voxel_size:
-        coord_min = np.min(coord, 0)
-        coord -= coord_min
-        uniq_idx = voxelize(coord, voxel_size)
-        coord, feat, label = coord[uniq_idx], feat[uniq_idx], label[uniq_idx]
-    if voxel_max and label.shape[0] > voxel_max:
-        init_idx = np.random.randint(label.shape[0]) if 'train' in split else label.shape[0] // 2
-        crop_idx = np.argsort(np.sum(np.square(coord - coord[init_idx]), 1))[:voxel_max]
-        coord, feat, label = coord[crop_idx], feat[crop_idx], label[crop_idx]
+    # if voxel_size:
+    #     coord_min = np.min(coord, 0)
+    #     coord -= coord_min
+    #     uniq_idx = voxelize(coord, voxel_size)
+    #     coord, feat, label = coord[uniq_idx], feat[uniq_idx], label[uniq_idx]
+    # if voxel_max and label.shape[0] > voxel_max:
+    #     init_idx = np.random.randint(label.shape[0]) if 'train' in split else label.shape[0] // 2
+    #     crop_idx = np.argsort(np.sum(np.square(coord - coord[init_idx]), 1))[:voxel_max]
+    #     coord, feat, label = coord[crop_idx], feat[crop_idx], label[crop_idx]
     if shuffle_index:
         shuf_idx = np.arange(coord.shape[0])
         np.random.shuffle(shuf_idx)
@@ -43,6 +102,46 @@ def data_prepare(coord, feat, label, split='train', voxel_size=0.04, voxel_max=N
     coord_min = np.min(coord, 0)
     coord -= coord_min
     coord = torch.FloatTensor(coord)
-    feat = torch.FloatTensor(feat) / 255.
+    feat = torch.FloatTensor(feat)
+    # # norm in space, not in time dimension
+    # feat = F.softmax(feat, dim=0)
+    feat = data_sparse(feat)
     label = torch.LongTensor(label)
     return coord, feat, label
+
+def calROIFCRS(sSeries,tSeries):
+    sSeries = sSeries-np.mean(sSeries,0)
+    normss = np.sqrt(np.sum(sSeries**2,0))
+    normss[normss<=0] = 1e-9
+    sSeries = sSeries/normss
+    
+    tSeries = tSeries-np.mean(tSeries,0)
+    normts = np.sqrt(np.sum(tSeries**2,0))
+    normts[normts<=0] = 1e-9
+    tSeries = tSeries/normts
+    
+    corr_mat = np.matmul(sSeries.transpose(),tSeries)
+    return corr_mat
+
+def generateCor2(atlas_roi,tc_matrix_clean_trun):
+    timePoints,verticalsNum = np.shape(tc_matrix_clean_trun)
+    
+    maxAtlas = int(np.max(atlas_roi))
+    minAtlas = int(np.min(atlas_roi))
+    averageRef = np.zeros([timePoints,maxAtlas-minAtlas+1])
+    corrList = np.zeros([verticalsNum,maxAtlas-minAtlas+1])
+
+    #cal mean according to atlas
+    for i in range(maxAtlas-minAtlas+1):
+        index = np.argwhere(np.squeeze(atlas_roi) == i+minAtlas)
+        index = np.transpose(np.squeeze(index))
+        index = index.tolist()
+        region_feature = tc_matrix_clean_trun[:,index]
+        averageRef[:,i] = np.mean(region_feature,1)
+
+
+    corrList = calROIFCRS(tc_matrix_clean_trun,averageRef)
+    return corrList
+
+
+

@@ -1,8 +1,8 @@
 #!/bin/sh
 
-export PYTHONPATH=./
-eval "$(conda shell.bash hook)"
-PYTHON=python
+# export PYTHONPATH=./
+# eval "$(conda shell.bash hook)"
+# PYTHON=python
 
 TRAIN_CODE=train.py
 TEST_CODE=test.py
@@ -18,10 +18,10 @@ mkdir -p ${model_dir} ${result_dir}
 mkdir -p ${result_dir}/last
 mkdir -p ${result_dir}/best
 cp tool/train.sh tool/${TRAIN_CODE} ${config} tool/test.sh tool/${TEST_CODE} ${exp_dir}
-
+export PYTHONPATH=/nfs2/users/zj/v1/pointnet/point-transformer/:$PYTHONPATH
 
 now=$(date +"%Y%m%d_%H%M%S")
-$PYTHON ${exp_dir}/${TRAIN_CODE} \
+python ${exp_dir}/${TRAIN_CODE} \
   --config=${config} \
   save_path ${exp_dir} \
   2>&1 | tee ${exp_dir}/train-$now.log
