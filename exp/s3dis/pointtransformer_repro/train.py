@@ -16,11 +16,12 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 import torch.optim.lr_scheduler as lr_scheduler
 from tensorboardX import SummaryWriter
+import scipy.sparse as sp
 
 from util import config
-from util.s3dis import S3DIS, swDataset
+from util.s3dis import S3DIS, swDataset, load_adj
 from util.common_util import AverageMeter, intersectionAndUnionGPU, find_free_port
-from util.data_util import collate_fn
+from util.data_util import collate_fn, sparse_mx_to_torch_sparse_tensor, chebyshev_polynomials
 from util import transform as t
 
 
@@ -167,6 +168,7 @@ def main_worker(gpu, ngpus_per_node, argss):
 
     # train_transform = t.Compose([t.RandomScale([0.9, 1.1]), t.ChromaticAutoContrast(), t.ChromaticTranslation(), t.ChromaticJitter(), t.HueSaturationTranslation()])
     train_data = swDataset(split='train', data_root=args.data_root, test_area=args.test_area, voxel_size=args.voxel_size, voxel_max=args.voxel_max, transform=None, shuffle_index=True, loop=args.loop)
+    T_k = load_adj()
     if main_process():
             logger.info("train_data samples: '{}'".format(len(train_data)))
     if args.distributed:
@@ -189,7 +191,7 @@ def main_worker(gpu, ngpus_per_node, argss):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
-        loss_train, mIoU_train, mAcc_train, allAcc_train = train(train_loader, model, criterion, optimizer, epoch)
+        loss_train, mIoU_train, mAcc_train, allAcc_train = train(train_loader, model, criterion, optimizer, epoch, T_k)
         scheduler.step()
         epoch_log = epoch + 1
         if main_process():
@@ -203,7 +205,7 @@ def main_worker(gpu, ngpus_per_node, argss):
             if args.data_name == 'shapenet':
                 raise NotImplementedError()
             else:
-                loss_val, mIoU_val, mAcc_val, allAcc_val = validate(val_loader, model, criterion)
+                loss_val, mIoU_val, mAcc_val, allAcc_val = validate(val_loader, model, criterion, T_k)
 
             if main_process():
                 writer.add_scalar('loss_val', loss_val, epoch_log)
@@ -227,7 +229,7 @@ def main_worker(gpu, ngpus_per_node, argss):
         logger.info('==>Training done!\nBest Iou: %.3f' % (best_iou))
 
 
-def train(train_loader, model, criterion, optimizer, epoch):
+def train(train_loader, model, criterion, optimizer, epoch, T_k):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     loss_meter = AverageMeter()
@@ -238,10 +240,11 @@ def train(train_loader, model, criterion, optimizer, epoch):
     model.train()
     end = time.time()
     max_iter = args.epochs * len(train_loader)
+
     for i, (coord, feat, target, offset) in enumerate(train_loader):  # (n, 3), (n, c), (n), (b)
         data_time.update(time.time() - end)
         coord, feat, target, offset = coord.cuda(non_blocking=True), feat.cuda(non_blocking=True), target.cuda(non_blocking=True), offset.cuda(non_blocking=True)
-        output = model([coord, feat, offset])
+        output = model([coord, feat, offset], T_k)
         if target.shape[-1] == 1:
             target = target[:, 0]  # for cls
         loss = criterion(output, target)
@@ -303,7 +306,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
     return loss_meter.avg, mIoU, mAcc, allAcc
 
 
-def validate(val_loader, model, criterion):
+def validate(val_loader, model, criterion, T_k):
     if main_process():
         logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     batch_time = AverageMeter()
@@ -312,7 +315,6 @@ def validate(val_loader, model, criterion):
     intersection_meter = AverageMeter()
     union_meter = AverageMeter()
     target_meter = AverageMeter()
-
     model.eval()
     end = time.time()
     for i, (coord, feat, target, offset) in enumerate(val_loader):
@@ -321,7 +323,7 @@ def validate(val_loader, model, criterion):
         if target.shape[-1] == 1:
             target = target[:, 0]  # for cls
         with torch.no_grad():
-            output = model([coord, feat, offset])
+            output = model([coord, feat, offset], T_k)
         loss = criterion(output, target)
 
         output = output.max(1)[1]

@@ -1,5 +1,8 @@
 import torch
 import torch.nn as nn
+from torch.nn.modules.module import Module
+from torch.nn.parameter import Parameter
+import torch.nn.functional as F
 
 from lib.pointops.functions import pointops
 
@@ -48,7 +51,33 @@ class TransitionDown(nn.Module):
             self.linear = nn.Linear(in_planes, out_planes, bias=False)
         self.bn = nn.BatchNorm1d(out_planes)
         self.relu = nn.ReLU(inplace=True)
-        
+        self.linear_pos = nn.Linear(out_planes, 3, bias=False)
+        self.bn_pos = nn.BatchNorm1d(3)
+        self.relu_pos = nn.ReLU(inplace=True)
+
+    # def forward(self, pxo):
+        # p, x, o = pxo  # (n, 3), (n, c), (b); o=[ 9391, 18782, 28173, 37564, 46955, 56346, 65737, 75128]
+
+        # if self.stride != 1:
+        #     n_o, count = [o[0].item() // self.stride], o[0].item() // self.stride
+        #     for i in range(1, o.shape[0]):
+        #         count += (o[i].item() - o[i-1].item()) // self.stride
+        #         n_o.append(count)  # [ 2347,  4694,  7041,  9388, 11735, 14082, 16429, 18776]
+        #     n_o = torch.cuda.IntTensor(n_o)
+        #     import pdb
+        #     pdb.set_trace()
+        #     value_top, ix_top = x_seed.topk(n_o[-1]//106 + 1, dim=0)
+
+        #     idx = ix_top[:n_o[-1]]
+        #     n_p = p[idx.long(), :]  # (m, 3)
+        #     x = pointops.queryandgroup(self.nsample, p, n_p, x, None, o, n_o, use_xyz=True)  # (m, 3+c, nsample)
+        #     x = self.relu(self.bn(self.linear(x).transpose(1, 2).contiguous()))  # (m, c, nsample)
+        #     x = self.pool(x).squeeze(-1)  # (m, c)
+        #     p, o = n_p, n_o
+        # else:
+        #     x = self.relu(self.bn(self.linear(x)))  # (n, c)
+        # return [p, x, o]
+       
     def forward(self, pxo):
         p, x, o = pxo  # (n, 3), (n, c), (b)
         if self.stride != 1:
@@ -70,6 +99,60 @@ class TransitionDown(nn.Module):
         # print("o = ", o)
 
         return [p, x, o]
+
+
+class LinearFunc(Module):
+    def __init__(self, in_planes, out_planes):
+        super(LinearFunc,self).__init__()
+        self.linear = nn.Linear(in_planes, out_planes, bias=False)
+        self.bn = nn.BatchNorm1d(out_planes)
+        self.relu = nn.ReLU(inplace=True)
+    def forward(self, x):
+        # x = self.relu(self.bn(self.linear(x)))
+        x = self.linear(x)
+        # x = x[:,:3].contiguous()
+        return x
+
+class GraphConvolution(Module):
+    """
+    Simple GCN layer, similar to https://arxiv.org/abs/1609.02907
+    """
+
+    def __init__(self, in_features, out_features, num_support, bias=False):
+        super(GraphConvolution, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.nsupport = num_support
+        self.linear = nn.Linear(in_features*num_support, out_features)
+        if bias:
+            self.bias = Parameter(torch.zeros(out_features))
+        else:
+            self.register_parameter('bias', None)
+
+    def forward(self, input, adj):
+
+        output_list = []
+        bs = input.shape[0] // adj.shape[-1]
+        for ix in range(bs):
+            input_single_st, input_single_ed = adj.shape[-1] * ix, adj.shape[-1] * (ix+1)
+            input_single = input[input_single_st:input_single_ed]
+            cheb_x = input_single.unsqueeze(2)
+            
+            for adj_ix in range(1, self.nsupport):
+                x1 = torch.mm(adj[adj_ix], input_single)
+                cheb_x = torch.cat((cheb_x, x1.unsqueeze(2)), 2)
+            cheb_x = cheb_x.reshape([input_single.shape[0], -1])
+
+            output_single = self.linear(cheb_x)
+            # print("self.linear.weight.grad: ", self.linear.weight.grad)
+            if self.bias is not None:
+                output_single = output_single + self.bias
+            output_list.append(output_single)
+        return torch.cat(output_list, dim=0)
+    def __repr__(self):
+        return self.__class__.__name__ + ' (' \
+               + str(self.in_features) + ' -> ' \
+               + str(self.out_features) + ')'
 
 
 class TransitionUp(nn.Module):
@@ -131,13 +214,14 @@ class PointTransformerBlock(nn.Module):
 
 
 class PointTransformerSeg(nn.Module):
-    def __init__(self, block, blocks, c=6, k=13):
+    def __init__(self, block, blocks, c=6, k=106):
         super().__init__()
         self.c = c
         self.in_planes, planes = c, [32, 64, 128, 256, 512]
         fpn_planes, fpnhead_planes, share_planes = 128, 64, 8
-        stride, nsample = [1, 4, 4, 4, 4], [8, 16, 16, 16, 16]
-        # stride, nsample = [1, 1, 1, 1, 1], [8, 16, 16, 16, 16]
+        # stride, nsample = [1, 4, 4, 4, 4], [8, 16, 16, 16, 16]
+        stride, nsample = [1, 4, 4, 4, 4], [8, 8, 8, 8, 8]
+
         self.enc1 = self._make_enc(block, planes[0], blocks[0], share_planes, stride=stride[0], nsample=nsample[0])  # N/1
         self.enc2 = self._make_enc(block, planes[1], blocks[1], share_planes, stride=stride[1], nsample=nsample[1])  # N/4
         self.enc3 = self._make_enc(block, planes[2], blocks[2], share_planes, stride=stride[2], nsample=nsample[2])  # N/16
@@ -149,6 +233,13 @@ class PointTransformerSeg(nn.Module):
         self.dec2 = self._make_dec(block, planes[1], 2, share_planes, nsample=nsample[1])  # fusion p3 and p2
         self.dec1 = self._make_dec(block, planes[0], 2, share_planes, nsample=nsample[0])  # fusion p2 and p1
         self.cls = nn.Sequential(nn.Linear(planes[0], planes[0]), nn.BatchNorm1d(planes[0]), nn.ReLU(inplace=True), nn.Linear(planes[0], k))
+
+        # self.gc1 = GraphConvolution(planes[0], planes[0], 4)
+        # self.gc2 = GraphConvolution(planes[0], k, 4)
+
+        # self.gch = GraphConvolution(nhid, nhid, nsupport)
+        # self.linear_fc = nn.Sequential(nn.Linear(9391, 3), nn.BatchNorm1d(3), nn.ReLU(inplace=True))
+        # self.linear_fc = LinearFunc(9391, self.c)
 
     def _make_enc(self, block, planes, blocks, share_planes=8, stride=1, nsample=16):
         layers = []
@@ -166,12 +257,11 @@ class PointTransformerSeg(nn.Module):
             layers.append(block(self.in_planes, self.in_planes, share_planes, nsample=nsample))
         return nn.Sequential(*layers)
 
-    def forward(self, pxo):
+    def forward(self, pxo, adj):
         p0, x0, o0 = pxo  # (n, 3), (n, c), (b)
-
-        x0 = p0 if self.c == 3 else torch.cat((p0, x0), 1)
-        # print("self.c = ", self.c)
-        # print("x0.shape = ", x0.shape)
+        global x_seed
+        # x0 = p0 if self.c == 3 else torch.cat((p0, x0), 1)
+        x_seed = x0.clone()
         p1, x1, o1 = self.enc1([p0, x0, o0])
         p2, x2, o2 = self.enc2([p1, x1, o1])
         p3, x3, o3 = self.enc3([p2, x2, o2])
@@ -183,7 +273,13 @@ class PointTransformerSeg(nn.Module):
         x3 = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4, o4]), o3])[1]
         x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
         x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
+        
         x = self.cls(x1)
+
+        # x0 = F.relu(self.gc1(x1, adj))
+        # x = F.relu(self.gc2(x0, adj))
+
+
         return x
 
 

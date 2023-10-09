@@ -10,6 +10,10 @@ from util.data_util import data_prepare, generateCor2, data_sparse
 from util.data_util import small2small
 from nilearn.surface import load_surf_data
 
+
+import scipy.sparse as sp
+from util.data_util import sparse_mx_to_torch_sparse_tensor, chebyshev_polynomials
+
 class S3DIS(Dataset):
     def __init__(self, split='train', data_root='trainval', test_area=5, voxel_size=0.04, voxel_max=None, transform=None, shuffle_index=False, loop=1):
         super().__init__()
@@ -39,18 +43,29 @@ class S3DIS(Dataset):
     def __len__(self):
         return len(self.data_idx) * self.loop
 
+def load_adj():
+    adjsm = np.load("/nfs2/users/zj/v1/pointnet/point-transformer/adjsm.npy",allow_pickle=True)
+    adjsm = sp.csr_matrix(adjsm.all())
+    adjsm = sparse_mx_to_torch_sparse_tensor(adjsm)
+    T_k = chebyshev_polynomials(adjsm, 4)
+
+    T_k = torch.FloatTensor(np.array(T_k))
+    T_k = T_k.cuda(non_blocking=True)
+    return T_k
 
 def load_morph_data(data_path, choice):
     output = []
+    len_data = len(choice)
     for morph_path in data_path:
         point_set_morph = load_surf_data(morph_path)
         #resample
-        point_set = point_set_white[choice, :]
-        point_set = point_set - np.expand_dims(np.mean(point_set, axis = 0), 0) # center
-        dist = np.max(np.sqrt(np.sum(point_set ** 2, axis = 1)),0)
+        point_set = point_set_morph[choice]
+        point_set = point_set - np.mean(point_set) # center
+        dist = np.max(np.abs(point_set))
         point_set = point_set / dist #scale
         output.append(point_set)
-    return output[0], output[1], output[2], output[3], output[4]    # thickness, sulc, curv, area, volume
+    output = np.stack(output).T
+    return output    # thickness, sulc, curv, area, volume
     
 
 
@@ -90,12 +105,16 @@ class swDataset(Dataset):
                 point_set = point_set - np.expand_dims(np.mean(point_set, axis = 0), 0) # center
                 dist = np.max(np.sqrt(np.sum(point_set ** 2, axis = 1)),0)
                 point_set = point_set / dist #scale
-                thickness, sulc, curv, area, volume = load_morph_data(datapath_L[idx][1:-1], choice)
+                morph_data = load_morph_data(datapath_L[idx][1:-1], self.choice)   # thickness, sulc, curv, area, volume
 
                 func_set = load_surf_data(datapath_L[idx][-1])[:, self.choice]
-                func_set = generateCor2(self.label,func_set)
-                initAtlas=np.expand_dims(np.argmax(func_set,axis=1),axis=1)
-                data_total =np.concatenate([point_set, initAtlas],axis=1)
+                # func_set = func_set.T
+                func_set_cor = generateCor2(self.label,func_set)
+                # initAtlas=np.expand_dims(np.argmax(func_set_cor,axis=1),axis=1)
+                # data_total =np.concatenate([point_set, morph_data, initAtlas],axis=1)
+
+                data_total =np.concatenate([point_set, morph_data, func_set_cor],axis=1)
+
 
                 sa_create("shm://{}".format("_".join(item)), data_total)
         self.data_idx = np.arange(len(self.sub_list))
@@ -106,10 +125,29 @@ class swDataset(Dataset):
         data_idx = self.sub_list[idx % len(self.sub_list)]
         data = SA.attach("shm://{}".format("_".join(data_idx))).copy()
 
-        coord, feat = data[:, 0:3], data[:, 3:]
+        coord, feat = data[:, 0:3], data[:, 8:]
+        # max_len = 242
+        # cortex_num, t = feat_raw.shape
+        # feat = np.zeros((cortex_num, max_len))
+        # if t < max_len:
+        #     feat[:, :t] = feat_raw
+        # else:
+        #     feat = feat_raw[:, :max_len]
+
+
+
         label = self.label
         coord, feat, label = data_prepare(coord, feat, label, self.split, self.voxel_size, self.voxel_max, self.transform, self.shuffle_index)
         # print("coord.shape = {}, feat.shape = {}, label.shape = {},".format(coord.shape, feat.shape, label.shape))
+
+        # stft_band = 8
+
+        # with torch.no_grad():
+        #     x0_ft = torch.stft(feat, stft_band)
+        #     total_samples = x0_ft.shape[0]
+        #     self.bs = total_samples // 9391
+        #     x0_ft = x0_ft.reshape(self.bs, 9391, -1)
+        #     x0_fc = torch.matmul(x0_ft,x0_ft.transpose(-1,-2)).reshape(total_samples, -1)
 
         return coord, feat, label
 

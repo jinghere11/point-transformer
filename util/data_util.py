@@ -10,6 +10,9 @@ from util.voxelize import voxelize
 from nilearn import surface
 import nibabel as nib
 
+import scipy.sparse as sp
+from scipy.sparse.linalg import eigsh
+
 def small2small(small_label, hemisphere):
 
     small_label[small_label == -1] = 0
@@ -138,10 +141,52 @@ def generateCor2(atlas_roi,tc_matrix_clean_trun):
         index = index.tolist()
         region_feature = tc_matrix_clean_trun[:,index]
         averageRef[:,i] = np.mean(region_feature,1)
-
-
     corrList = calROIFCRS(tc_matrix_clean_trun,averageRef)
     return corrList
 
+def normalize_adj(adj):
+    """Symmetrically normalize adjacency matrix."""
+    # import pdb
+    # pdb.set_trace()
+    adj = adj.to_dense()
+    adj = sp.coo_matrix(adj)
+    rowsum = np.array(adj.sum(1))
+    d_inv_sqrt = np.power(rowsum, -0.5).flatten()
+    d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
+    d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
+    return adj.dot(d_mat_inv_sqrt).transpose().dot(d_mat_inv_sqrt).tocoo()
 
 
+def sparse_mx_to_torch_sparse_tensor(sparse_mx):
+    """Convert a scipy sparse matrix to a torch sparse tensor."""
+    sparse_mx = sparse_mx.tocoo().astype(np.float32)
+
+    indices = torch.from_numpy(
+        np.vstack((sparse_mx.row, sparse_mx.col)).astype(np.int64))
+    values = torch.from_numpy(sparse_mx.data)
+    shape = torch.Size(sparse_mx.shape)
+    return torch.sparse.FloatTensor(indices, values, shape)
+
+
+def chebyshev_polynomials(adj, k):
+    """Calculate Chebyshev polynomials up to order k. Return a list of sparse matrices (tuple representation)."""
+    # print("Calculating Chebyshev polynomials up to order {}...".format(k))
+
+    adj_normalized = normalize_adj(adj)
+    laplacian = sp.eye(adj.shape[0]) - adj_normalized
+
+    largest_eigval, _ = eigsh(laplacian, 1, which='LM')
+    scaled_laplacian = (2. / largest_eigval[0]) * laplacian - sp.eye(adj.shape[0])
+    
+    t_k = list()
+    t_k.append(sp.eye(adj.shape[0]).todense())
+    t_k.append(scaled_laplacian.todense())
+
+    def chebyshev_recurrence(t_k_minus_one, t_k_minus_two, scaled_lap):
+        s_lap = sp.csr_matrix(scaled_lap, copy=True)
+        return 2 * s_lap.dot(t_k_minus_one) - t_k_minus_two
+
+    for i in range(2, k+1):
+        t_k.append(chebyshev_recurrence(t_k[-1], t_k[-2], scaled_laplacian))
+
+    return t_k

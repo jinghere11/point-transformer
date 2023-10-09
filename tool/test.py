@@ -14,7 +14,7 @@ import torch.nn.parallel
 import torch.optim
 import torch.utils.data
 
-from util.s3dis import swDataset
+from util.s3dis import swDataset, load_adj
 from util.data_util import collate_fn,saveGiiLabel
 from util import config
 from util.common_util import AverageMeter, intersectionAndUnion, check_makedirs
@@ -76,7 +76,8 @@ def main():
         args.epoch = checkpoint['epoch']
     else:
         raise RuntimeError("=> no checkpoint found at '{}'".format(args.model_path))
-    test(model, criterion, names)
+    T_k = load_adj()
+    test(model, criterion, names, T_k)
 
 
 def data_prepare():
@@ -95,7 +96,7 @@ def data_prepare():
     return data_list, sub_list
 
 
-def test(model, criterion, names):
+def test(model, criterion, names, T_k):
     logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     batch_time = AverageMeter()
     intersection_meter = AverageMeter()
@@ -117,7 +118,7 @@ def test(model, criterion, names):
         feat_part = feat_part.cuda(non_blocking=True)
         offset_part = offset_part.cuda(non_blocking=True)
         with torch.no_grad():
-            pred_part = model([coord_part, feat_part, offset_part])  # (n, k)
+            pred_part = model([coord_part, feat_part, offset_part], T_k)  # (n, k)
 
         torch.cuda.empty_cache()
         pred = pred_part
