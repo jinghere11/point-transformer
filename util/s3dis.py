@@ -73,7 +73,7 @@ class swDataset(Dataset):
     def __init__(self, split='train', data_root='trainval', test_area=5, voxel_size=None, voxel_max=None, transform=None, shuffle_index=False, loop=1):
         super().__init__()
         self.split, self.voxel_size, self.transform, self.voxel_max, self.shuffle_index, self.loop = split, voxel_size, transform, voxel_max, shuffle_index, loop
-        trainset_percent = 0.8
+        trainset_percent = 0.5
         with open(os.path.join(data_root,"datalist_sw_t1.txt"),"r") as f:
             sub_list = f.readlines()
             sub_list = [ix[:-1].split() for ix in sub_list]
@@ -125,23 +125,15 @@ class swDataset(Dataset):
         data_idx = self.sub_list[idx % len(self.sub_list)]
         data = SA.attach("shm://{}".format("_".join(data_idx))).copy()
 
-        coord, feat = data[:, 0:3], data[:, 8:]
-        # max_len = 242
-        # cortex_num, t = feat_raw.shape
-        # feat = np.zeros((cortex_num, max_len))
-        # if t < max_len:
-        #     feat[:, :t] = feat_raw
-        # else:
-        #     feat = feat_raw[:, :max_len]
-
-
-
+        coord, feat = data[:, :3], data[:, 8:]
+        initAtlas=np.expand_dims(np.argmax(feat,axis=1),axis=1)
         label = self.label
-        coord, feat, label = data_prepare(coord, feat, label, self.split, self.voxel_size, self.voxel_max, self.transform, self.shuffle_index)
+        mask = np.squeeze(initAtlas) == label
+        # transform is crop, hue_tuning, etc. Default none, todo: Mask is not included in transform.
+        coord, feat, label, mask = data_prepare(coord, feat, label, mask, self.split, self.voxel_size, self.voxel_max, self.transform, self.shuffle_index)
         # print("coord.shape = {}, feat.shape = {}, label.shape = {},".format(coord.shape, feat.shape, label.shape))
 
         # stft_band = 8
-
         # with torch.no_grad():
         #     x0_ft = torch.stft(feat, stft_band)
         #     total_samples = x0_ft.shape[0]
@@ -149,7 +141,7 @@ class swDataset(Dataset):
         #     x0_ft = x0_ft.reshape(self.bs, 9391, -1)
         #     x0_fc = torch.matmul(x0_ft,x0_ft.transpose(-1,-2)).reshape(total_samples, -1)
 
-        return coord, feat, label
+        return coord, feat, label, mask
 
     def __len__(self):
         return len(self.data_idx) * self.loop

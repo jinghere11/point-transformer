@@ -59,7 +59,7 @@ def main():
         from model.pointtransformer.pointtransformer_seg import pointtransformer_seg_repro as Model
     else:
         raise Exception('architecture not supported yet'.format(args.arch))
-    model = Model(c=args.fea_dim, k=args.classes).cuda()
+    model = Model(c=args.fea_dim, k=args.classes, gcn_num=args.gcn_num).cuda()
     logger.info(model)
     criterion = nn.CrossEntropyLoss(ignore_index=args.ignore_label).cuda()
     names = [line.rstrip('\n') for line in open(args.names_path)]
@@ -113,7 +113,7 @@ def test(model, criterion, names, T_k):
     for idx, item in enumerate(test_loader):
         s_i, e_i = idx * args.batch_size_test, min((idx + 1) * args.batch_size_test, len(sub_list))
         data_idx = sub_list[s_i:e_i]
-        coord_part, feat_part, label, offset_part = item
+        coord_part, feat_part, label, test, offset_part = item
         coord_part = coord_part.cuda(non_blocking=True)
         feat_part = feat_part.cuda(non_blocking=True)
         offset_part = offset_part.cuda(non_blocking=True)

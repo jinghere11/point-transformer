@@ -108,13 +108,17 @@ def main_worker(gpu, ngpus_per_node, argss):
         from model.pointtransformer.pointtransformer_seg import pointtransformer_seg_repro as Model
     else:
         raise Exception('architecture not supported yet'.format(args.arch))
-    model = Model(c=args.fea_dim, k=args.classes)
+    model = Model(c=args.fea_dim, k=args.classes, gcn_num=args.gcn_num, training=True)
     if args.sync_bn:
        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     criterion = nn.CrossEntropyLoss(ignore_index=args.ignore_label).cuda()
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=args.base_lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(args.epochs*0.6), int(args.epochs*0.8)], gamma=0.1)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=args.base_lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.base_lr, weight_decay=5e-4)
+    # scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(args.epochs*0.8), int(args.epochs*0.9)], gamma=0.1)
+    scheduler =  lr_scheduler.CosineAnnealingLR(optimizer = optimizer,
+                                                            T_max = args.epochs) 
+
 
     if main_process():
         global logger, writer
@@ -241,13 +245,15 @@ def train(train_loader, model, criterion, optimizer, epoch, T_k):
     end = time.time()
     max_iter = args.epochs * len(train_loader)
 
-    for i, (coord, feat, target, offset) in enumerate(train_loader):  # (n, 3), (n, c), (n), (b)
+    for i, (coord, feat, target, mask, offset) in enumerate(train_loader):  # (n, 3), (n, c), (n), (b)
         data_time.update(time.time() - end)
         coord, feat, target, offset = coord.cuda(non_blocking=True), feat.cuda(non_blocking=True), target.cuda(non_blocking=True), offset.cuda(non_blocking=True)
         output = model([coord, feat, offset], T_k)
         if target.shape[-1] == 1:
             target = target[:, 0]  # for cls
-        loss = criterion(output, target)
+
+        mask = torch.nonzero(mask).squeeze()
+        loss = criterion(output[mask], target[mask])
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -317,7 +323,7 @@ def validate(val_loader, model, criterion, T_k):
     target_meter = AverageMeter()
     model.eval()
     end = time.time()
-    for i, (coord, feat, target, offset) in enumerate(val_loader):
+    for i, (coord, feat, target, mask, offset) in enumerate(val_loader):
         data_time.update(time.time() - end)
         coord, feat, target, offset = coord.cuda(non_blocking=True), feat.cuda(non_blocking=True), target.cuda(non_blocking=True), offset.cuda(non_blocking=True)
         if target.shape[-1] == 1:

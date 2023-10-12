@@ -47,6 +47,7 @@ class TransitionDown(nn.Module):
         if stride != 1:
             self.linear = nn.Linear(3+in_planes, out_planes, bias=False)
             self.pool = nn.MaxPool1d(nsample)
+            # self.pool = nn.AvgPool1d(nsample)
         else:
             self.linear = nn.Linear(in_planes, out_planes, bias=False)
         self.bn = nn.BatchNorm1d(out_planes)
@@ -55,50 +56,53 @@ class TransitionDown(nn.Module):
         self.bn_pos = nn.BatchNorm1d(3)
         self.relu_pos = nn.ReLU(inplace=True)
 
-    # def forward(self, pxo):
-        # p, x, o = pxo  # (n, 3), (n, c), (b); o=[ 9391, 18782, 28173, 37564, 46955, 56346, 65737, 75128]
-
-        # if self.stride != 1:
-        #     n_o, count = [o[0].item() // self.stride], o[0].item() // self.stride
-        #     for i in range(1, o.shape[0]):
-        #         count += (o[i].item() - o[i-1].item()) // self.stride
-        #         n_o.append(count)  # [ 2347,  4694,  7041,  9388, 11735, 14082, 16429, 18776]
-        #     n_o = torch.cuda.IntTensor(n_o)
-        #     import pdb
-        #     pdb.set_trace()
-        #     value_top, ix_top = x_seed.topk(n_o[-1]//106 + 1, dim=0)
-
-        #     idx = ix_top[:n_o[-1]]
-        #     n_p = p[idx.long(), :]  # (m, 3)
-        #     x = pointops.queryandgroup(self.nsample, p, n_p, x, None, o, n_o, use_xyz=True)  # (m, 3+c, nsample)
-        #     x = self.relu(self.bn(self.linear(x).transpose(1, 2).contiguous()))  # (m, c, nsample)
-        #     x = self.pool(x).squeeze(-1)  # (m, c)
-        #     p, o = n_p, n_o
-        # else:
-        #     x = self.relu(self.bn(self.linear(x)))  # (n, c)
-        # return [p, x, o]
-       
     def forward(self, pxo):
-        p, x, o = pxo  # (n, 3), (n, c), (b)
+        p, x, o = pxo  # (n, 3), (n, c), (b); o=[ 9391, 18782, 28173, 37564, 46955, 56346, 65737, 75128]
+
         if self.stride != 1:
             n_o, count = [o[0].item() // self.stride], o[0].item() // self.stride
             for i in range(1, o.shape[0]):
                 count += (o[i].item() - o[i-1].item()) // self.stride
                 n_o.append(count)
             n_o = torch.cuda.IntTensor(n_o)
+
+            # pos_func = torch.argsort(x_seed, descending=True)
+            # idx = pointops.furthestsampling(pos_func[:,:3].contiguous().float(), o, n_o)  # (m)
+
             idx = pointops.furthestsampling(p, o, n_o)  # (m)
             n_p = p[idx.long(), :]  # (m, 3)
             x = pointops.queryandgroup(self.nsample, p, n_p, x, None, o, n_o, use_xyz=True)  # (m, 3+c, nsample)
             x = self.relu(self.bn(self.linear(x).transpose(1, 2).contiguous()))  # (m, c, nsample)
             x = self.pool(x).squeeze(-1)  # (m, c)
             p, o = n_p, n_o
-        else:
-            x = self.relu(self.bn(self.linear(x)))  # (n, c)
-        # print("p.shape = ", p.shape)
-        # print("x.shape = ", x.shape)
-        # print("o = ", o)
 
+        else:
+            # import pdb
+            # pdb.set_trace()
+            x = self.relu(self.bn(self.linear(x)))  # (n, c)
         return [p, x, o]
+       
+    # def forward(self, pxo):
+    #     p, x, o = pxo  # (n, 3), (n, c), (b)
+    #     if self.stride != 1:
+    #         n_o, count = [o[0].item() // self.stride], o[0].item() // self.stride
+    #         for i in range(1, o.shape[0]):
+    #             count += (o[i].item() - o[i-1].item()) // self.stride
+    #             n_o.append(count)
+    #         n_o = torch.cuda.IntTensor(n_o)
+    #         idx = pointops.furthestsampling(p, o, n_o)  # (m)
+    #         n_p = p[idx.long(), :]  # (m, 3)
+    #         x = pointops.queryandgroup(self.nsample, p, n_p, x, None, o, n_o, use_xyz=True)  # (m, 3+c, nsample)
+    #         x = self.relu(self.bn(self.linear(x).transpose(1, 2).contiguous()))  # (m, c, nsample)
+    #         x = self.pool(x).squeeze(-1)  # (m, c)
+    #         p, o = n_p, n_o
+    #     else:
+    #         x = self.relu(self.bn(self.linear(x)))  # (n, c)
+    #     # print("p.shape = ", p.shape)
+    #     # print("x.shape = ", x.shape)
+    #     # print("o = ", o)
+
+    #     return [p, x, o]
 
 
 class LinearFunc(Module):
@@ -137,13 +141,19 @@ class GraphConvolution(Module):
             input_single_st, input_single_ed = adj.shape[-1] * ix, adj.shape[-1] * (ix+1)
             input_single = input[input_single_st:input_single_ed]
             cheb_x = input_single.unsqueeze(2)
-            
+
             for adj_ix in range(1, self.nsupport):
                 x1 = torch.mm(adj[adj_ix], input_single)
                 cheb_x = torch.cat((cheb_x, x1.unsqueeze(2)), 2)
             cheb_x = cheb_x.reshape([input_single.shape[0], -1])
 
-            output_single = self.linear(cheb_x)
+            # cheb_x = cheb_x.transpose(0, 1).reshape([input_single.shape[1], -1])
+            try:
+                output_single = self.linear(cheb_x)
+            except:
+                import pdb
+                pdb.set_trace()
+
             # print("self.linear.weight.grad: ", self.linear.weight.grad)
             if self.bias is not None:
                 output_single = output_single + self.bias
@@ -214,14 +224,22 @@ class PointTransformerBlock(nn.Module):
 
 
 class PointTransformerSeg(nn.Module):
-    def __init__(self, block, blocks, c=6, k=106):
+    def __init__(self, block, blocks, c=6, k=106, gcn_num=2, training=False):
         super().__init__()
         self.c = c
+        self.gcn_num = gcn_num
         self.in_planes, planes = c, [32, 64, 128, 256, 512]
         fpn_planes, fpnhead_planes, share_planes = 128, 64, 8
         # stride, nsample = [1, 4, 4, 4, 4], [8, 16, 16, 16, 16]
         stride, nsample = [1, 4, 4, 4, 4], [8, 8, 8, 8, 8]
 
+        self.res = 0.7
+        self.dropout = 0.5
+        self.training = training
+
+        self.gc0 = GraphConvolution(self.in_planes, 64, 4)
+        self.gch = GraphConvolution(64, 64, 4)
+        self.gc1 = GraphConvolution(64, self.in_planes, 4)
         self.enc1 = self._make_enc(block, planes[0], blocks[0], share_planes, stride=stride[0], nsample=nsample[0])  # N/1
         self.enc2 = self._make_enc(block, planes[1], blocks[1], share_planes, stride=stride[1], nsample=nsample[1])  # N/4
         self.enc3 = self._make_enc(block, planes[2], blocks[2], share_planes, stride=stride[2], nsample=nsample[2])  # N/16
@@ -234,7 +252,9 @@ class PointTransformerSeg(nn.Module):
         self.dec1 = self._make_dec(block, planes[0], 2, share_planes, nsample=nsample[0])  # fusion p2 and p1
         self.cls = nn.Sequential(nn.Linear(planes[0], planes[0]), nn.BatchNorm1d(planes[0]), nn.ReLU(inplace=True), nn.Linear(planes[0], k))
 
-        # self.gc1 = GraphConvolution(planes[0], planes[0], 4)
+        # self.bn = nn.LayerNorm(nhid)
+
+
         # self.gc2 = GraphConvolution(planes[0], k, 4)
 
         # self.gch = GraphConvolution(nhid, nhid, nsupport)
@@ -247,6 +267,7 @@ class PointTransformerSeg(nn.Module):
         self.in_planes = planes * block.expansion
         for _ in range(1, blocks):
             layers.append(block(self.in_planes, self.in_planes, share_planes, nsample=nsample))
+
         return nn.Sequential(*layers)
 
     def _make_dec(self, block, planes, blocks, share_planes=8, nsample=16, is_head=False):
@@ -261,26 +282,55 @@ class PointTransformerSeg(nn.Module):
         p0, x0, o0 = pxo  # (n, 3), (n, c), (b)
         global x_seed
         # x0 = p0 if self.c == 3 else torch.cat((p0, x0), 1)
-        x_seed = x0.clone()
-        p1, x1, o1 = self.enc1([p0, x0, o0])
-        p2, x2, o2 = self.enc2([p1, x1, o1])
-        p3, x3, o3 = self.enc3([p2, x2, o2])
-        p4, x4, o4 = self.enc4([p3, x3, o3])
-        p5, x5, o5 = self.enc5([p4, x4, o4])
+        x = x0
+        list_res = []
 
-        x5 = self.dec5[1:]([p5, self.dec5[0]([p5, x5, o5]), o5])[1]
-        x4 = self.dec4[1:]([p4, self.dec4[0]([p4, x4, o4], [p5, x5, o5]), o4])[1]
-        x3 = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4, o4]), o3])[1]
-        x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
-        x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
+        y = F.relu(self.gc0(x, adj))
+        list_res.append(y)
         
-        x = self.cls(x1)
+        # y, idx  = self.pool(y)
+        # y = self.unpool(y, idx)
+        
+        # print("shape of pool " + str(y.size()))
+        y = F.dropout(y, self.dropout, training=self.training)
+        for layer_ix in range(self.gcn_num):
+            y = F.relu(self.gch(y, adj))
+            list_res.append(y)
+            # y, idx  = self.pool(y)
+            # y = self.unpool(y, idx)
+        if self.res:
+            for i in range(self.gcn_num):
+                y += list_res[i]
+        # print("after res the shape is " + str(y.size()))
+        # y, idx  = self.pool(y)
+        # y = self.unpool(y, idx)
+        
+        # print("shape of last y is " + str(y.size()))
+        
+        # y = self.linear(y)
+        # print("output of unpool is " + str(y.size()))
+        # y = self.attn(y)
+        y = self.gc1(y, adj)
+        return y
+        
+
+        # p1, x1, o1 = self.enc1([p0, x0, o0])
+        # p2, x2, o2 = self.enc2([p1, x1, o1])
+        # p3, x3, o3 = self.enc3([p2, x2, o2])
+        # p4, x4, o4 = self.enc4([p3, x3, o3])
+        # p5, x5, o5 = self.enc5([p4, x4, o4])
+
+        # x5 = self.dec5[1:]([p5, self.dec5[0]([p5, x5, o5]), o5])[1]
+        # x4 = self.dec4[1:]([p4, self.dec4[0]([p4, x4, o4], [p5, x5, o5]), o4])[1]
+        # x3 = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4, o4]), o3])[1]
+        # x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
+        # x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
+
+        # x = self.cls(x1)
 
         # x0 = F.relu(self.gc1(x1, adj))
         # x = F.relu(self.gc2(x0, adj))
-
-
-        return x
+        # resturn x
 
 
 def pointtransformer_seg_repro(**kwargs):

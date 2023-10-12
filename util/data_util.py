@@ -67,12 +67,12 @@ def sa_create(name, var):
 
 
 def collate_fn(batch):
-    coord, feat, label = list(zip(*batch))
+    coord, feat, label, mask = list(zip(*batch))
     offset, count = [], 0
     for item in coord:
         count += item.shape[0]
         offset.append(count)
-    return torch.cat(coord), torch.cat(feat), torch.cat(label), torch.IntTensor(offset)
+    return torch.cat(coord), torch.cat(feat), torch.cat(label), torch.cat(mask), torch.IntTensor(offset)
 
 
 def data_sparse(x, k = 0.8):      #L:9391 R:9409
@@ -84,7 +84,7 @@ def data_sparse(x, k = 0.8):      #L:9391 R:9409
     return res
 
 
-def data_prepare(coord, feat, label, split='train', voxel_size=0.04, voxel_max=None, transform=None, shuffle_index=False):
+def data_prepare(coord, feat, label, mask, split='train', voxel_size=0.04, voxel_max=None, transform=None, shuffle_index=False):
 
     if transform:
         coord, feat, label = transform(coord, feat, label)
@@ -100,17 +100,27 @@ def data_prepare(coord, feat, label, split='train', voxel_size=0.04, voxel_max=N
     if shuffle_index:
         shuf_idx = np.arange(coord.shape[0])
         np.random.shuffle(shuf_idx)
-        coord, feat, label = coord[shuf_idx], feat[shuf_idx], label[shuf_idx]
+        coord, feat, label, mask = coord[shuf_idx], feat[shuf_idx], label[shuf_idx], mask[shuf_idx]
 
     coord_min = np.min(coord, 0)
     coord -= coord_min
     coord = torch.FloatTensor(coord)
-    feat = torch.FloatTensor(feat)
+
     # # norm in space, not in time dimension
     # feat = F.softmax(feat, dim=0)
-    feat = data_sparse(feat)
+    # feat = data_sparse(feat)
+
+    feat = np.exp(feat/0.02)
+
+    sumNorm =  np.sum(feat,axis=1)
+    sumNorm = np.expand_dims(sumNorm, axis=1)
+    feat = feat/sumNorm
+
+    feat = torch.FloatTensor(feat)
+
     label = torch.LongTensor(label)
-    return coord, feat, label
+    mask = torch.LongTensor(mask)
+    return coord, feat, label, mask
 
 def calROIFCRS(sSeries,tSeries):
     sSeries = sSeries-np.mean(sSeries,0)
