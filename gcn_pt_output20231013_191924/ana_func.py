@@ -106,7 +106,7 @@ def plotDiceBar(atlasPath,test_dict,hemi,output):
     plt.xticks(np.arange(2), ('intra', 'inter'))
     plt.yticks(np.arange(0, 1, 0.2))
     plt.savefig('{}/dice_{}.jpg'.format(output, hemi))
-file_path = "{}/output20231009_134024".format(os.getcwd())
+file_path = "{}/gcn_pt_output20231013_191924".format(os.getcwd())
 
 cur_dir = os.getcwd()
 os.chdir(file_path)

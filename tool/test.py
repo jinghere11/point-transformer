@@ -55,11 +55,19 @@ def main():
     logger.info("=> creating model ...")
     logger.info("Classes: {}".format(args.classes))
 
+
+    data_list, sub_list = data_prepare('0.8')
+    # data_list, sub_list = data_prepare('0.0')
+
+    test_loader = torch.utils.data.DataLoader(data_list, batch_size=args.batch_size_test, shuffle=None, num_workers=args.workers, pin_memory=True, sampler=None, drop_last=True, collate_fn=collate_fn)
+
+
     if args.arch == 'pointtransformer_seg_repro':
         from model.pointtransformer.pointtransformer_seg import pointtransformer_seg_repro as Model
     else:
         raise Exception('architecture not supported yet'.format(args.arch))
-    model = Model(c=args.fea_dim, k=args.classes, gcn_num=args.gcn_num).cuda()
+
+    model = Model(c=args.fea_dim, k=args.classes, gcn_num=args.gcn_num, cheb_order=args.cheb_order).cuda()
     logger.info(model)
     criterion = nn.CrossEntropyLoss(ignore_index=args.ignore_label).cuda()
     names = [line.rstrip('\n') for line in open(args.names_path)]
@@ -76,16 +84,16 @@ def main():
         args.epoch = checkpoint['epoch']
     else:
         raise RuntimeError("=> no checkpoint found at '{}'".format(args.model_path))
-    T_k = load_adj()
-    test(model, criterion, names, T_k)
+    T_k = load_adj(args.cheb_order)
+    test(model, test_loader, sub_list, criterion, names, T_k)
 
-
-def data_prepare():
+# TODO: test percents should be change in many places
+def data_prepare(split_percent):
     if args.data_name == 's3dis':
         data_list = sorted(os.listdir(args.data_root))
         data_list = [item[:-4] for item in data_list if 'Area_{}'.format(args.test_area) in item]
     elif args.data_name == 'swDataset':
-        data_list = swDataset(split='', data_root=args.data_root, test_area=args.test_area, voxel_size=args.voxel_size, voxel_max=args.voxel_max, transform=None, shuffle_index=False, loop=1)
+        data_list = swDataset(split=split_percent, data_root=args.data_root, test_area=args.test_area, voxel_size=args.voxel_size, voxel_max=args.voxel_max, transform=None, shuffle_index=False, loop=1)
     else:
         raise Exception('dataset not supported yet'.format(args.data_name))
     with open(os.path.join(args.data_root,"datalist_sw_t1.txt"),"r") as f:
@@ -93,10 +101,10 @@ def data_prepare():
         sub_list = [ix[:-1].split() for ix in sub_list]
 
     print("Totally {} samples in val set.".format(len(data_list)))
-    return data_list, sub_list
+    return data_list, sub_list[int(len(sub_list)*float(split_percent)):]
 
 
-def test(model, criterion, names, T_k):
+def test(model, test_loader, sub_list, criterion, names, T_k):
     logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     batch_time = AverageMeter()
     intersection_meter = AverageMeter()
@@ -106,10 +114,10 @@ def test(model, criterion, names, T_k):
 
     check_makedirs(args.save_folder)
     pred_save, label_save = [], []
-    data_list, sub_list = data_prepare()
+
     res_filename = "output" + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     os.makedirs(os.path.join(os.getcwd(),res_filename))
-    test_loader = torch.utils.data.DataLoader(data_list, batch_size=args.batch_size_test, shuffle=None, num_workers=args.workers, pin_memory=True, sampler=None, drop_last=False, collate_fn=collate_fn)
+
     for idx, item in enumerate(test_loader):
         s_i, e_i = idx * args.batch_size_test, min((idx + 1) * args.batch_size_test, len(sub_list))
         data_idx = sub_list[s_i:e_i]
@@ -118,10 +126,13 @@ def test(model, criterion, names, T_k):
         feat_part = feat_part.cuda(non_blocking=True)
         offset_part = offset_part.cuda(non_blocking=True)
         with torch.no_grad():
-            pred_part = model([coord_part, feat_part, offset_part], T_k)  # (n, k)
+            pred_part, pred_pt, pred_gcn = model([coord_part, feat_part, offset_part], T_k)  # (n, k)
+            # pred_pt = model([coord_part, feat_part, offset_part], T_k)  # (n, k)
 
         torch.cuda.empty_cache()
-        pred = pred_part
+
+        # pred = pred_pt
+        pred = pred_gcn
         # logger.info('Test: {}/{}, {}/{}, {}/{}'.format(idx + 1, len(data_list), e_i, len(idx_list), args.voxel_max, idx_part.shape[0]))
         loss = criterion(pred, torch.LongTensor(label).cuda(non_blocking=True))  # for reference
         pred = pred.max(1)[1].data.cpu().numpy()

@@ -9,6 +9,8 @@ from nilearn import surface
 import logging
 import colorlog
 import datetime
+from tqdm import tqdm
+
 
 def calDiceROI(rest1,rest2,totalArea=106): 
     parcels = totalArea
@@ -50,7 +52,7 @@ def diceStats(atlasPath, test_dict, hemi):
     inter_df = pd.DataFrame(columns=["sub_name", "sess_num", "sub_other", "sess_other", "dice"])
     group_label = surface.load_surf_data("/nfs2/users/zj/Brainnetome/fsaverage.{}.BN_Atlas.10k_fsaverage.label.gii".format(hemi))
     file_general = ".indi.{}.label.gii".format(hemi)
-    for i in range(subnum):
+    for i in tqdm(range(subnum)):
 
         # if subnames[i] in ["sub-25638","sub-25632_wrong"]:
             # continue
@@ -106,7 +108,7 @@ def plotDiceBar(atlasPath,test_dict,hemi,output):
     plt.xticks(np.arange(2), ('intra', 'inter'))
     plt.yticks(np.arange(0, 1, 0.2))
     plt.savefig('{}/dice_{}.jpg'.format(output, hemi))
-file_path = "{}/output20231009_163245".format(os.getcwd())
+file_path = "{}/output20231019_130204".format(os.getcwd())
 
 cur_dir = os.getcwd()
 os.chdir(file_path)

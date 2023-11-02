@@ -97,24 +97,20 @@ def data_prepare(coord, feat, label, mask, split='train', voxel_size=0.04, voxel
     #     init_idx = np.random.randint(label.shape[0]) if 'train' in split else label.shape[0] // 2
     #     crop_idx = np.argsort(np.sum(np.square(coord - coord[init_idx]), 1))[:voxel_max]
     #     coord, feat, label = coord[crop_idx], feat[crop_idx], label[crop_idx]
-    if shuffle_index:
-        shuf_idx = np.arange(coord.shape[0])
-        np.random.shuffle(shuf_idx)
-        coord, feat, label, mask = coord[shuf_idx], feat[shuf_idx], label[shuf_idx], mask[shuf_idx]
+    # if shuffle_index:
+    #     shuf_idx = np.arange(coord.shape[0])
+    #     np.random.shuffle(shuf_idx)
+    #     coord, feat, label, mask = coord[shuf_idx], feat[shuf_idx], label[shuf_idx], mask[shuf_idx]
 
     coord_min = np.min(coord, 0)
     coord -= coord_min
     coord = torch.FloatTensor(coord)
 
     # # norm in space, not in time dimension
-    # feat = F.softmax(feat, dim=0)
+
     # feat = data_sparse(feat)
 
-    feat = np.exp(feat/0.02)
 
-    sumNorm =  np.sum(feat,axis=1)
-    sumNorm = np.expand_dims(sumNorm, axis=1)
-    feat = feat/sumNorm
 
     feat = torch.FloatTensor(feat)
 
@@ -156,8 +152,6 @@ def generateCor2(atlas_roi,tc_matrix_clean_trun):
 
 def normalize_adj(adj):
     """Symmetrically normalize adjacency matrix."""
-    # import pdb
-    # pdb.set_trace()
     adj = adj.to_dense()
     adj = sp.coo_matrix(adj)
     rowsum = np.array(adj.sum(1))

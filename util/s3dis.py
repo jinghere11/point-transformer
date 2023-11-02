@@ -6,13 +6,15 @@ import SharedArray as SA
 from torch.utils.data import Dataset
 
 from util.data_util import sa_create
-from util.data_util import data_prepare, generateCor2, data_sparse
+from util.data_util import data_prepare, generateCor2
 from util.data_util import small2small
 from nilearn.surface import load_surf_data
 
-
+import random
 import scipy.sparse as sp
 from util.data_util import sparse_mx_to_torch_sparse_tensor, chebyshev_polynomials
+
+# global my_list
 
 class S3DIS(Dataset):
     def __init__(self, split='train', data_root='trainval', test_area=5, voxel_size=0.04, voxel_max=None, transform=None, shuffle_index=False, loop=1):
@@ -43,11 +45,11 @@ class S3DIS(Dataset):
     def __len__(self):
         return len(self.data_idx) * self.loop
 
-def load_adj():
+def load_adj(cheb_order):
     adjsm = np.load("/nfs2/users/zj/v1/pointnet/point-transformer/adjsm.npy",allow_pickle=True)
     adjsm = sp.csr_matrix(adjsm.all())
     adjsm = sparse_mx_to_torch_sparse_tensor(adjsm)
-    T_k = chebyshev_polynomials(adjsm, 4)
+    T_k = chebyshev_polynomials(adjsm, cheb_order+1)
 
     T_k = torch.FloatTensor(np.array(T_k))
     T_k = T_k.cuda(non_blocking=True)
@@ -67,13 +69,11 @@ def load_morph_data(data_path, choice):
     output = np.stack(output).T
     return output    # thickness, sulc, curv, area, volume
     
-
-
 class swDataset(Dataset):
     def __init__(self, split='train', data_root='trainval', test_area=5, voxel_size=None, voxel_max=None, transform=None, shuffle_index=False, loop=1):
         super().__init__()
         self.split, self.voxel_size, self.transform, self.voxel_max, self.shuffle_index, self.loop = split, voxel_size, transform, voxel_max, shuffle_index, loop
-        trainset_percent = 0.5
+        trainset_percent = 0.3
         with open(os.path.join(data_root,"datalist_sw_t1.txt"),"r") as f:
             sub_list = f.readlines()
             sub_list = [ix[:-1].split() for ix in sub_list]
@@ -85,13 +85,26 @@ class swDataset(Dataset):
             os.path.join(data_root,"{}/{}/{}/fsaverage_surf/{}.L.area.10k_fsaverage.shape.gii".format(ix[0],ix[1],ix[1],ix[1])), \
             os.path.join(data_root,"{}/{}/{}/fsaverage_surf/{}.L.volume.10k_fsaverage.shape.gii".format(ix[0],ix[1],ix[1],ix[1])), \
             os.path.join(func_root,"{}_{}.L.10k_fsaverage.func.gii".format(ix[0],ix[1]))] for ix in sub_list]
+        # global my_list
+
         if split == "train":
             self.sub_list = sub_list[:int(len(sub_list)*trainset_percent)]
-        elif split == "eval":
-            self.sub_list = sub_list[int(len(sub_list)*trainset_percent):]
-        else:
-            self.sub_list = sub_list
+            # random.shuffle(self.sub_list)
 
+            # my_list = self.sub_list
+            # global pt_seg_values
+            # pt_seg_values = torch.zeros(len(my_list), 9391, 106).cuda()
+
+        elif split == "val":
+            self.sub_list = sub_list[int(len(sub_list)*trainset_percent):int(len(sub_list)*trainset_percent)+23]
+            # self.sub_list = sub_list[int(len(sub_list)*trainset_percent):]
+        elif not split:
+            self.sub_list = sub_list
+            # my_list = self.sub_list
+        else:
+            # self.sub_list = sub_list[int(len(sub_list)*trainset_percent):]
+            self.sub_list = sub_list[int(len(sub_list)*float(split)):]
+            # my_list = self.sub_list
         self.label = np.load("/nfs2/users/zj/v1/Brainnetome/mesh_label_all_L_fsaverage10k.npy")
         self.label = small2small(self.label, "L")
         self.choice = np.loadtxt("/nfs2/users/zj/v1/Brainnetome/metric_index_L_fsaverage10k.txt").astype(int)
@@ -120,26 +133,33 @@ class swDataset(Dataset):
         self.data_idx = np.arange(len(self.sub_list))
         print("Totally {} samples in {} set.".format(len(self.data_idx), split))
 
+
+
+
+
+
     def __getitem__(self, idx):
 
-        data_idx = self.sub_list[idx % len(self.sub_list)]
-        data = SA.attach("shm://{}".format("_".join(data_idx))).copy()
+        # data_idx = self.sub_list[idx % len(self.sub_list)]
+        data_idx = self.sub_list[idx]
 
+        data = SA.attach("shm://{}".format("_".join(data_idx))).copy()
         coord, feat = data[:, :3], data[:, 8:]
-        initAtlas=np.expand_dims(np.argmax(feat,axis=1),axis=1)
+
+        initAtlas = np.argmax(feat,axis=1)
+
         label = self.label
-        mask = np.squeeze(initAtlas) == label
+
         # transform is crop, hue_tuning, etc. Default none, todo: Mask is not included in transform.
+        # idx = self.mask_keys.index(data_idx)
+        # if torch.sum(self.mask_values[idx]) == 0:
+        #     mask = initAtlas == label
+        #     self._update_mask(data_idx, mask)
+        # else:
+        #     mask = self.mask_values[idx]
+        mask = initAtlas == label
         coord, feat, label, mask = data_prepare(coord, feat, label, mask, self.split, self.voxel_size, self.voxel_max, self.transform, self.shuffle_index)
         # print("coord.shape = {}, feat.shape = {}, label.shape = {},".format(coord.shape, feat.shape, label.shape))
-
-        # stft_band = 8
-        # with torch.no_grad():
-        #     x0_ft = torch.stft(feat, stft_band)
-        #     total_samples = x0_ft.shape[0]
-        #     self.bs = total_samples // 9391
-        #     x0_ft = x0_ft.reshape(self.bs, 9391, -1)
-        #     x0_fc = torch.matmul(x0_ft,x0_ft.transpose(-1,-2)).reshape(total_samples, -1)
 
         return coord, feat, label, mask
 

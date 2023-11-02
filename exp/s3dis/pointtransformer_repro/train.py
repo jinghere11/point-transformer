@@ -23,6 +23,7 @@ from util.s3dis import S3DIS, swDataset, load_adj
 from util.common_util import AverageMeter, intersectionAndUnionGPU, find_free_port
 from util.data_util import collate_fn, sparse_mx_to_torch_sparse_tensor, chebyshev_polynomials
 from util import transform as t
+from lightly.loss.ntx_ent_loss import NTXentLoss
 
 
 def get_parser():
@@ -106,18 +107,20 @@ def main_worker(gpu, ngpus_per_node, argss):
 
     if args.arch == 'pointtransformer_seg_repro':
         from model.pointtransformer.pointtransformer_seg import pointtransformer_seg_repro as Model
+
     else:
         raise Exception('architecture not supported yet'.format(args.arch))
-    model = Model(c=args.fea_dim, k=args.classes, gcn_num=args.gcn_num, training=True)
+    model = Model(c=args.fea_dim, k=args.classes, gcn_num=args.gcn_num, cheb_order=args.cheb_order, dropout=args.drop_rate, training=True)
     if args.sync_bn:
        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     criterion = nn.CrossEntropyLoss(ignore_index=args.ignore_label).cuda()
-
+    # criterion_ntx = NTXentLoss(temperature = 0.1).cuda()
+    # criterion_contrast = ContrastiveLoss().cuda()
+# 
     # optimizer = torch.optim.SGD(model.parameters(), lr=args.base_lr, momentum=args.momentum, weight_decay=args.weight_decay)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.base_lr, weight_decay=5e-4)
-    # scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(args.epochs*0.8), int(args.epochs*0.9)], gamma=0.1)
-    scheduler =  lr_scheduler.CosineAnnealingLR(optimizer = optimizer,
-                                                            T_max = args.epochs) 
+    # scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(args.epochs*0.6), int(args.epochs*0.8)], gamma=0.1)
+    scheduler =  lr_scheduler.CosineAnnealingLR(optimizer = optimizer, T_max = args.epochs) 
 
 
     if main_process():
@@ -172,15 +175,16 @@ def main_worker(gpu, ngpus_per_node, argss):
 
     # train_transform = t.Compose([t.RandomScale([0.9, 1.1]), t.ChromaticAutoContrast(), t.ChromaticTranslation(), t.ChromaticJitter(), t.HueSaturationTranslation()])
     train_data = swDataset(split='train', data_root=args.data_root, test_area=args.test_area, voxel_size=args.voxel_size, voxel_max=args.voxel_max, transform=None, shuffle_index=True, loop=args.loop)
-    T_k = load_adj()
+    T_k = load_adj(args.cheb_order)
+    
     if main_process():
             logger.info("train_data samples: '{}'".format(len(train_data)))
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_data)
     else:
         train_sampler = None
-
-    train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=(train_sampler is None), num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True, collate_fn=collate_fn)
+    # train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=(train_sampler is None), num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True, collate_fn=collate_fn)
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True, collate_fn=collate_fn)
 
     val_loader = None
     if args.evaluate:
@@ -190,12 +194,17 @@ def main_worker(gpu, ngpus_per_node, argss):
             val_sampler = torch.utils.data.distributed.DistributedSampler(val_data)
         else:
             val_sampler = None
-        val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size_val, shuffle=False, num_workers=args.workers, pin_memory=True, sampler=val_sampler, collate_fn=collate_fn)
+        val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size_val, shuffle=False, num_workers=args.workers, pin_memory=True, sampler=val_sampler, drop_last=True, collate_fn=collate_fn)
+
+
+    # tt_data = swDataset(split='', data_root=args.data_root, test_area=args.test_area, voxel_size=args.voxel_size, voxel_max=800000, transform=val_transform)
+    # tt_data_loader = torch.utils.data.DataLoader(tt_data, batch_size=1, shuffle=False, num_workers=args.workers, pin_memory=True, sampler=None, drop_last=False, collate_fn=collate_fn)
 
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
-        loss_train, mIoU_train, mAcc_train, allAcc_train = train(train_loader, model, criterion, optimizer, epoch, T_k)
+
+        loss_train, mIoU_train, mAcc_train, allAcc_train = train(train_loader, model, criterion, optimizer, epoch, T_k, swDataset)
         scheduler.step()
         epoch_log = epoch + 1
         if main_process():
@@ -209,7 +218,7 @@ def main_worker(gpu, ngpus_per_node, argss):
             if args.data_name == 'shapenet':
                 raise NotImplementedError()
             else:
-                loss_val, mIoU_val, mAcc_val, allAcc_val = validate(val_loader, model, criterion, T_k)
+                loss_val, mIoU_val, mAcc_val, allAcc_val = validate(val_loader, model, criterion, T_k, swDataset)
 
             if main_process():
                 writer.add_scalar('loss_val', loss_val, epoch_log)
@@ -220,27 +229,30 @@ def main_worker(gpu, ngpus_per_node, argss):
                 best_iou = max(best_iou, mIoU_val)
 
         if (epoch_log % args.save_freq == 0) and main_process():
-            filename = args.save_path + '/model/model_last.pth'
+            filename = args.save_path + '/model'+'/model_last.pth'
             logger.info('Saving checkpoint to: ' + filename)
             torch.save({'epoch': epoch_log, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict(),
                         'scheduler': scheduler.state_dict(), 'best_iou': best_iou, 'is_best': is_best}, filename)
             if is_best:
                 logger.info('Best validation mIoU updated to: {:.4f}'.format(best_iou))
-                shutil.copyfile(filename, args.save_path + '/model/model_best.pth')
+                shutil.copyfile(filename, args.save_path + '/model'+'/model_best.pth')
 
     if main_process():
         writer.close()
         logger.info('==>Training done!\nBest Iou: %.3f' % (best_iou))
 
+def accuracy_func(preds, labels):
+    return torch.mean((labels==preds).float())
 
-def train(train_loader, model, criterion, optimizer, epoch, T_k):
+
+def train(train_loader, model, criterion, optimizer, epoch, T_k, swDataset):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     loss_meter = AverageMeter()
     intersection_meter = AverageMeter()
     union_meter = AverageMeter()
     target_meter = AverageMeter()
-
+    contrast_meter = AverageMeter()
     model.train()
     end = time.time()
     max_iter = args.epochs * len(train_loader)
@@ -248,17 +260,38 @@ def train(train_loader, model, criterion, optimizer, epoch, T_k):
     for i, (coord, feat, target, mask, offset) in enumerate(train_loader):  # (n, 3), (n, c), (n), (b)
         data_time.update(time.time() - end)
         coord, feat, target, offset = coord.cuda(non_blocking=True), feat.cuda(non_blocking=True), target.cuda(non_blocking=True), offset.cuda(non_blocking=True)
-        output = model([coord, feat, offset], T_k)
+
+        output, output_pt, output_gcn = model([coord, feat, offset], T_k)
+
+
+
+        # output_pt = model([coord, feat, offset], T_k)
         if target.shape[-1] == 1:
             target = target[:, 0]  # for cls
 
         mask = torch.nonzero(mask).squeeze()
-        loss = criterion(output[mask], target[mask])
+ 
+        output_pt_label = output_pt.max(1)[1]
+        # output_gcn_label = indices[:, 0]
+        # mask_gcn = torch.nonzero((output_gcn_label == target)).squeeze()
+
+        # output_loss = torch.mean(output.reshape([args.batch_size, 9391, 106]), dim=0)
+        # output_loss_pt = torch.mean(output_pt.reshape([args.batch_size, 9391, 106]), dim=0)
+        # target_loss = target[:9391]
+        # loss = criterion(output_loss_pt, target_loss)
+
+        # # contrast_loss = criterion(logits, labels)*0.01
+
+        loss = criterion(output_gcn[mask], target[mask])
+
+
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        output = output.max(1)[1]
+        output = output_gcn.max(1)[1]
+        # output = output_pt_label
         n = coord.size(0)
         if args.multiprocessing_distributed:
             loss *= n
@@ -266,6 +299,9 @@ def train(train_loader, model, criterion, optimizer, epoch, T_k):
             dist.all_reduce(loss), dist.all_reduce(count)
             n = count.item()
             loss /= n
+
+        # accuracy = accuracy_func(output, target)
+
         intersection, union, target = intersectionAndUnionGPU(output, target, args.classes, args.ignore_label)
         if args.multiprocessing_distributed:
             dist.all_reduce(intersection), dist.all_reduce(union), dist.all_reduce(target)
@@ -312,7 +348,7 @@ def train(train_loader, model, criterion, optimizer, epoch, T_k):
     return loss_meter.avg, mIoU, mAcc, allAcc
 
 
-def validate(val_loader, model, criterion, T_k):
+def validate(val_loader, model, criterion, T_k, swDataset):
     if main_process():
         logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     batch_time = AverageMeter()
@@ -329,10 +365,24 @@ def validate(val_loader, model, criterion, T_k):
         if target.shape[-1] == 1:
             target = target[:, 0]  # for cls
         with torch.no_grad():
-            output = model([coord, feat, offset], T_k)
-        loss = criterion(output, target)
+            output, output_pt, output_gcn = model([coord, feat, offset], T_k)
+            # output_pt = model([coord, feat, offset], T_k)
 
+        # output_pt = output_pt.max(1)[1]
+        # loss = criterion(output, target) #  + criterion(output_gcn, output_pt)
+        output_pt_label = output_pt.max(1)[1]
+        # loss = criterion(output[mask], target[mask]) + criterion(output_gcn, output_pt_label)
+        loss = criterion(output_pt[mask], target[mask])
+
+        # L1_reg = 0
+        # for param in model.parameters():
+        #     L1_reg += torch.sum(torch.abs(param))
+        # loss += 0.001 * L1_reg  # lambda=0.001
+
+        output = output_gcn
         output = output.max(1)[1]
+
+        # output = output_pt_label
         n = coord.size(0)
         if args.multiprocessing_distributed:
             loss *= n
@@ -340,7 +390,7 @@ def validate(val_loader, model, criterion, T_k):
             dist.all_reduce(loss), dist.all_reduce(count)
             n = count.item()
             loss /= n
-
+        # accuracy = accuracy_func(output, target)
         intersection, union, target = intersectionAndUnionGPU(output, target, args.classes, args.ignore_label)
         if args.multiprocessing_distributed:
             dist.all_reduce(intersection), dist.all_reduce(union), dist.all_reduce(target)
@@ -348,6 +398,7 @@ def validate(val_loader, model, criterion, T_k):
         intersection_meter.update(intersection), union_meter.update(union), target_meter.update(target)
 
         accuracy = sum(intersection_meter.val) / (sum(target_meter.val) + 1e-10)
+
         loss_meter.update(loss.item(), n)
         batch_time.update(time.time() - end)
         end = time.time()

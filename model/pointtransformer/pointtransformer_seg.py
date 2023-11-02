@@ -5,6 +5,12 @@ from torch.nn.parameter import Parameter
 import torch.nn.functional as F
 
 from lib.pointops.functions import pointops
+import torch.nn.parallel
+import torch.utils.data
+from torch.autograd import Variable
+import numpy as np
+
+
 
 
 class PointTransformerLayer(nn.Module):
@@ -47,7 +53,6 @@ class TransitionDown(nn.Module):
         if stride != 1:
             self.linear = nn.Linear(3+in_planes, out_planes, bias=False)
             self.pool = nn.MaxPool1d(nsample)
-            # self.pool = nn.AvgPool1d(nsample)
         else:
             self.linear = nn.Linear(in_planes, out_planes, bias=False)
         self.bn = nn.BatchNorm1d(out_planes)
@@ -77,8 +82,6 @@ class TransitionDown(nn.Module):
             p, o = n_p, n_o
 
         else:
-            # import pdb
-            # pdb.set_trace()
             x = self.relu(self.bn(self.linear(x)))  # (n, c)
         return [p, x, o]
        
@@ -134,26 +137,17 @@ class GraphConvolution(Module):
             self.register_parameter('bias', None)
 
     def forward(self, input, adj):
-
         output_list = []
         bs = input.shape[0] // adj.shape[-1]
         for ix in range(bs):
             input_single_st, input_single_ed = adj.shape[-1] * ix, adj.shape[-1] * (ix+1)
             input_single = input[input_single_st:input_single_ed]
             cheb_x = input_single.unsqueeze(2)
-
             for adj_ix in range(1, self.nsupport):
                 x1 = torch.mm(adj[adj_ix], input_single)
                 cheb_x = torch.cat((cheb_x, x1.unsqueeze(2)), 2)
             cheb_x = cheb_x.reshape([input_single.shape[0], -1])
-
-            # cheb_x = cheb_x.transpose(0, 1).reshape([input_single.shape[1], -1])
-            try:
-                output_single = self.linear(cheb_x)
-            except:
-                import pdb
-                pdb.set_trace()
-
+            output_single = self.linear(cheb_x)
             # print("self.linear.weight.grad: ", self.linear.weight.grad)
             if self.bias is not None:
                 output_single = output_single + self.bias
@@ -185,11 +179,7 @@ class TransitionUp(nn.Module):
                 else:
                     s_i, e_i, cnt = o[i-1], o[i], o[i] - o[i-1]
                 x_b = x[s_i:e_i, :]
-                try:
-                    x_b = torch.cat((x_b, self.linear2(x_b.sum(0, True) / cnt).repeat(cnt, 1)), 1)
-                except:
-                    import pdb
-                    pdb.set_trace()
+                x_b = torch.cat((x_b, self.linear2(x_b.sum(0, True) / cnt).repeat(cnt, 1)), 1)
                 x_tmp.append(x_b)
             x = torch.cat(x_tmp, 0)
             x = self.linear1(x)
@@ -223,23 +213,47 @@ class PointTransformerBlock(nn.Module):
         return [p, x, o]
 
 
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(DepthwiseSeparableConv, self).__init__()
+        self.depthwise = nn.Conv1d(in_channels, in_channels, kernel_size=3, stride=1, padding=1, groups=in_channels)
+        self.pointwise = nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+
+        # self.depthwise = nn.Linear(in_channels, in_channels)
+        # self.bn_d = nn.BatchNorm1d(in_channels)
+        # self.relu_d = nn.ReLU(inplace=True)
+
+        # self.pointwise = nn.Linear(in_channels, out_channels)
+        # self.bn_p = nn.BatchNorm1d(out_channels)
+        # self.relu_p = nn.ReLU(inplace=True)
+
+
+    def forward(self, x):
+        # out = self.relu_d(self.bn_d(self.depthwise(x)))
+        out = self.pointwise(self.depthwise(x))
+
+        return out
+
+
 class PointTransformerSeg(nn.Module):
-    def __init__(self, block, blocks, c=6, k=106, gcn_num=2, training=False):
+    def __init__(self, block, blocks, c=6, k=106, gcn_num=2, cheb_order=7, resolution=9391, dropout=0.5, training=False):
         super().__init__()
         self.c = c
         self.gcn_num = gcn_num
         self.in_planes, planes = c, [32, 64, 128, 256, 512]
+
         fpn_planes, fpnhead_planes, share_planes = 128, 64, 8
         # stride, nsample = [1, 4, 4, 4, 4], [8, 16, 16, 16, 16]
         stride, nsample = [1, 4, 4, 4, 4], [8, 8, 8, 8, 8]
 
-        self.res = 0.7
-        self.dropout = 0.5
+
+        self.dropout = dropout
         self.training = training
 
-        self.gc0 = GraphConvolution(self.in_planes, 64, 4)
-        self.gch = GraphConvolution(64, 64, 4)
-        self.gc1 = GraphConvolution(64, self.in_planes, 4)
+        self.gc0 = GraphConvolution(k, 32, cheb_order)
+        self.gch = GraphConvolution(32, 32, cheb_order)
+        self.gc1 = GraphConvolution(32, k, cheb_order)
+        # self.pointnet_3d = PointNetDenseCls(k)
         self.enc1 = self._make_enc(block, planes[0], blocks[0], share_planes, stride=stride[0], nsample=nsample[0])  # N/1
         self.enc2 = self._make_enc(block, planes[1], blocks[1], share_planes, stride=stride[1], nsample=nsample[1])  # N/4
         self.enc3 = self._make_enc(block, planes[2], blocks[2], share_planes, stride=stride[2], nsample=nsample[2])  # N/16
@@ -251,15 +265,12 @@ class PointTransformerSeg(nn.Module):
         self.dec2 = self._make_dec(block, planes[1], 2, share_planes, nsample=nsample[1])  # fusion p3 and p2
         self.dec1 = self._make_dec(block, planes[0], 2, share_planes, nsample=nsample[0])  # fusion p2 and p1
         self.cls = nn.Sequential(nn.Linear(planes[0], planes[0]), nn.BatchNorm1d(planes[0]), nn.ReLU(inplace=True), nn.Linear(planes[0], k))
+        self.pos_bn = nn.BatchNorm1d(resolution)
+        self.ln_gcn = nn.LayerNorm(k)
+        self.ln_pt = nn.LayerNorm(k)
 
-        # self.bn = nn.LayerNorm(nhid)
-
-
-        # self.gc2 = GraphConvolution(planes[0], k, 4)
-
-        # self.gch = GraphConvolution(nhid, nhid, nsupport)
-        # self.linear_fc = nn.Sequential(nn.Linear(9391, 3), nn.BatchNorm1d(3), nn.ReLU(inplace=True))
-        # self.linear_fc = LinearFunc(9391, self.c)
+        self.conv = DepthwiseSeparableConv(2, 1)
+        self.maxpool = nn.MaxPool1d(kernel_size=2, stride=1, padding=0)
 
     def _make_enc(self, block, planes, blocks, share_planes=8, stride=1, nsample=16):
         layers = []
@@ -280,59 +291,54 @@ class PointTransformerSeg(nn.Module):
 
     def forward(self, pxo, adj):
         p0, x0, o0 = pxo  # (n, 3), (n, c), (b)
-        global x_seed
-        # x0 = p0 if self.c == 3 else torch.cat((p0, x0), 1)
-        x = x0
-        list_res = []
 
-        y = F.relu(self.gc0(x, adj))
+        global x_seed
+        bs = x0.shape[0]//o0[0]
+        x_seed = x0.clone()
+        x_seed = torch.exp(x_seed/0.02)
+        sumNorm =  torch.sum(x_seed,axis=1)
+        sumNorm = sumNorm.unsqueeze(1)
+        x_seed = x_seed/sumNorm
+        list_res = []
+        y = F.relu(self.gc0(x_seed, adj))
         list_res.append(y)
-        
-        # y, idx  = self.pool(y)
-        # y = self.unpool(y, idx)
-        
-        # print("shape of pool " + str(y.size()))
         y = F.dropout(y, self.dropout, training=self.training)
         for layer_ix in range(self.gcn_num):
             y = F.relu(self.gch(y, adj))
             list_res.append(y)
-            # y, idx  = self.pool(y)
-            # y = self.unpool(y, idx)
-        if self.res:
-            for i in range(self.gcn_num):
-                y += list_res[i]
-        # print("after res the shape is " + str(y.size()))
-        # y, idx  = self.pool(y)
-        # y = self.unpool(y, idx)
-        
-        # print("shape of last y is " + str(y.size()))
-        
-        # y = self.linear(y)
-        # print("output of unpool is " + str(y.size()))
-        # y = self.attn(y)
+        for i in range(self.gcn_num):
+            y += list_res[i]
         y = self.gc1(y, adj)
-        return y
-        
 
-        # p1, x1, o1 = self.enc1([p0, x0, o0])
-        # p2, x2, o2 = self.enc2([p1, x1, o1])
-        # p3, x3, o3 = self.enc3([p2, x2, o2])
-        # p4, x4, o4 = self.enc4([p3, x3, o3])
-        # p5, x5, o5 = self.enc5([p4, x4, o4])
+        y = self.ln_gcn(y)
 
-        # x5 = self.dec5[1:]([p5, self.dec5[0]([p5, x5, o5]), o5])[1]
-        # x4 = self.dec4[1:]([p4, self.dec4[0]([p4, x4, o4], [p5, x5, o5]), o4])[1]
-        # x3 = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4, o4]), o3])[1]
-        # x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
-        # x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
+        fx = x0.max(1)[1].unsqueeze(1).float()
+        fx = p0 if self.c == 3 else torch.cat((p0, fx), 1)
+        p1, x1, o1 = self.enc1([p0, fx, o0])
+        p2, x2, o2 = self.enc2([p1, x1, o1])
+        p3, x3, o3 = self.enc3([p2, x2, o2])
+        p4, x4, o4 = self.enc4([p3, x3, o3])
+        p5, x5, o5 = self.enc5([p4, x4, o4])
 
-        # x = self.cls(x1)
+        x5 = self.dec5[1:]([p5, self.dec5[0]([p5, x5, o5]), o5])[1]
+        x4 = self.dec4[1:]([p4, self.dec4[0]([p4, x4, o4], [p5, x5, o5]), o4])[1]
+        x3 = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4, o4]), o3])[1]
+        x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
+        x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
 
-        # x0 = F.relu(self.gc1(x1, adj))
-        # x = F.relu(self.gc2(x0, adj))
-        # resturn x
+
+        x = self.cls(x1)
+
+        x = self.ln_pt(x).squeeze()
+
+        output_stack = torch.stack((x,y),dim=2)
+        output_stack = self.maxpool(output_stack).squeeze()
+
+        return output_stack, x, y
+
+
 
 
 def pointtransformer_seg_repro(**kwargs):
-    model = PointTransformerSeg(PointTransformerBlock, [2, 3, 4, 6, 3], **kwargs)
+    model = PointTransformerSeg(PointTransformerBlock, [2, 3, 4, 4, 2], **kwargs)
     return model
