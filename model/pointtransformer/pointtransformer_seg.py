@@ -57,9 +57,9 @@ class TransitionDown(nn.Module):
             self.linear = nn.Linear(in_planes, out_planes, bias=False)
         self.bn = nn.BatchNorm1d(out_planes)
         self.relu = nn.ReLU(inplace=True)
-        self.linear_pos = nn.Linear(out_planes, 3, bias=False)
-        self.bn_pos = nn.BatchNorm1d(3)
-        self.relu_pos = nn.ReLU(inplace=True)
+        # self.linear_pos = nn.Linear(out_planes, 3, bias=False)
+        # self.bn_pos = nn.BatchNorm1d(3)
+        # self.relu_pos = nn.ReLU(inplace=True)
 
     def forward(self, pxo):
         p, x, o = pxo  # (n, 3), (n, c), (b); o=[ 9391, 18782, 28173, 37564, 46955, 56346, 65737, 75128]
@@ -70,10 +70,6 @@ class TransitionDown(nn.Module):
                 count += (o[i].item() - o[i-1].item()) // self.stride
                 n_o.append(count)
             n_o = torch.cuda.IntTensor(n_o)
-
-            # pos_func = torch.argsort(x_seed, descending=True)
-            # idx = pointops.furthestsampling(pos_func[:,:3].contiguous().float(), o, n_o)  # (m)
-
             idx = pointops.furthestsampling(p, o, n_o)  # (m)
             n_p = p[idx.long(), :]  # (m, 3)
             x = pointops.queryandgroup(self.nsample, p, n_p, x, None, o, n_o, use_xyz=True)  # (m, 3+c, nsample)
@@ -243,16 +239,17 @@ class PointTransformerSeg(nn.Module):
         self.in_planes, planes = c, [32, 64, 128, 256, 512]
 
         fpn_planes, fpnhead_planes, share_planes = 128, 64, 8
-        # stride, nsample = [1, 4, 4, 4, 4], [8, 16, 16, 16, 16]
-        stride, nsample = [1, 4, 4, 4, 4], [8, 8, 8, 8, 8]
+        stride, nsample = [1, 4, 4, 4, 4], [8, 16, 16, 16, 16]
+        # stride, nsample = [1, 4, 4, 4, 4], [8, 8, 8, 8, 8]
 
 
         self.dropout = dropout
         self.training = training
+        self.resolution = resolution
 
-        self.gc0 = GraphConvolution(k, 32, cheb_order)
-        self.gch = GraphConvolution(32, 32, cheb_order)
-        self.gc1 = GraphConvolution(32, k, cheb_order)
+        self.gc0 = GraphConvolution(k, 64, cheb_order)
+        self.gch = GraphConvolution(64, 64, cheb_order)
+        self.gc1 = GraphConvolution(64, k, cheb_order)
         # self.pointnet_3d = PointNetDenseCls(k)
         self.enc1 = self._make_enc(block, planes[0], blocks[0], share_planes, stride=stride[0], nsample=nsample[0])  # N/1
         self.enc2 = self._make_enc(block, planes[1], blocks[1], share_planes, stride=stride[1], nsample=nsample[1])  # N/4
@@ -271,6 +268,7 @@ class PointTransformerSeg(nn.Module):
 
         self.conv = DepthwiseSeparableConv(2, 1)
         self.maxpool = nn.MaxPool1d(kernel_size=2, stride=1, padding=0)
+        self.smooth = nn.Conv1d(k, k, kernel_size=3,stride=1,padding=1)
 
     def _make_enc(self, block, planes, blocks, share_planes=8, stride=1, nsample=16):
         layers = []
@@ -312,9 +310,7 @@ class PointTransformerSeg(nn.Module):
 
         y = self.ln_gcn(y)
 
-        fx = x0.max(1)[1].unsqueeze(1).float()
-        fx = p0 if self.c == 3 else torch.cat((p0, fx), 1)
-        p1, x1, o1 = self.enc1([p0, fx, o0])
+        p1, x1, o1 = self.enc1([p0, x0, o0])
         p2, x2, o2 = self.enc2([p1, x1, o1])
         p3, x3, o3 = self.enc3([p2, x2, o2])
         p4, x4, o4 = self.enc4([p3, x3, o3])
@@ -325,20 +321,18 @@ class PointTransformerSeg(nn.Module):
         x3 = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4, o4]), o3])[1]
         x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
         x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
-
-
         x = self.cls(x1)
-
         x = self.ln_pt(x).squeeze()
 
         output_stack = torch.stack((x,y),dim=2)
         output_stack = self.maxpool(output_stack).squeeze()
+        output_stack = F.dropout(output_stack, 0.4, training=self.training)
+        # output_stack = self.smooth(output_stack.reshape(-1, self.resolution, output_stack.shape[-1]).transpose(-1,-2)).transpose(-1,-2)
+        output_stack = self.smooth(output_stack.reshape(-1, self.resolution, output_stack.shape[-1]).transpose(-1,-2)).transpose(-1,-2)
+        # output_stack = output_stack.reshape(-1, x.shape[-1])
 
         return output_stack, x, y
 
-
-
-
 def pointtransformer_seg_repro(**kwargs):
-    model = PointTransformerSeg(PointTransformerBlock, [2, 3, 4, 4, 2], **kwargs)
+    model = PointTransformerSeg(PointTransformerBlock, [2, 3, 4, 6, 3], **kwargs)
     return model

@@ -56,8 +56,8 @@ def main():
     logger.info("Classes: {}".format(args.classes))
 
 
+    # data_list, sub_list = data_prepare('0.5')
     data_list, sub_list = data_prepare('0.8')
-    # data_list, sub_list = data_prepare('0.0')
 
     test_loader = torch.utils.data.DataLoader(data_list, batch_size=args.batch_size_test, shuffle=None, num_workers=args.workers, pin_memory=True, sampler=None, drop_last=True, collate_fn=collate_fn)
 
@@ -131,10 +131,12 @@ def test(model, test_loader, sub_list, criterion, names, T_k):
 
         torch.cuda.empty_cache()
 
-        # pred = pred_pt
-        pred = pred_gcn
+        pred = pred_part
+        pred = pred.reshape(-1, pred.shape[-1])
         # logger.info('Test: {}/{}, {}/{}, {}/{}'.format(idx + 1, len(data_list), e_i, len(idx_list), args.voxel_max, idx_part.shape[0]))
         loss = criterion(pred, torch.LongTensor(label).cuda(non_blocking=True))  # for reference
+
+
         pred = pred.max(1)[1].data.cpu().numpy()
         for save_idx in range(len(data_idx)):
             pred_si, pred_se = save_idx * len(pred)//len(data_idx), (save_idx + 1) * len(pred)//len(data_idx)

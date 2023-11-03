@@ -86,6 +86,7 @@ def main():
         swDataset(split='val', data_root=args.data_root, test_area=args.test_area)
     else:
         raise NotImplementedError()
+
     if args.multiprocessing_distributed:
         port = find_free_port()
         args.dist_url = f"tcp://localhost:{port}"
@@ -117,10 +118,10 @@ def main_worker(gpu, ngpus_per_node, argss):
     # criterion_ntx = NTXentLoss(temperature = 0.1).cuda()
     # criterion_contrast = ContrastiveLoss().cuda()
 # 
-    # optimizer = torch.optim.SGD(model.parameters(), lr=args.base_lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.base_lr, weight_decay=5e-4)
-    # scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(args.epochs*0.6), int(args.epochs*0.8)], gamma=0.1)
-    scheduler =  lr_scheduler.CosineAnnealingLR(optimizer = optimizer, T_max = args.epochs) 
+    optimizer = torch.optim.SGD(model.parameters(), lr=args.base_lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=args.base_lr, weight_decay=5e-4)
+    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(args.epochs*0.6), int(args.epochs*0.8)], gamma=0.1)
+    # scheduler =  lr_scheduler.CosineAnnealingLR(optimizer = optimizer, T_max = args.epochs) 
 
 
     if main_process():
@@ -270,27 +271,29 @@ def train(train_loader, model, criterion, optimizer, epoch, T_k, swDataset):
             target = target[:, 0]  # for cls
 
         mask = torch.nonzero(mask).squeeze()
- 
-        output_pt_label = output_pt.max(1)[1]
+
+        # output_pt = output_pt.reshape(-1, output_pt.shape[-1])
+        # output_pt_label = output_pt.max(1)[1]
         # output_gcn_label = indices[:, 0]
         # mask_gcn = torch.nonzero((output_gcn_label == target)).squeeze()
 
-        # output_loss = torch.mean(output.reshape([args.batch_size, 9391, 106]), dim=0)
+        output_loss = torch.median(output, dim=0)[0]
+
+        output = output.reshape(-1, output.shape[-1])
         # output_loss_pt = torch.mean(output_pt.reshape([args.batch_size, 9391, 106]), dim=0)
-        # target_loss = target[:9391]
+        target_loss = target[:9391]
         # loss = criterion(output_loss_pt, target_loss)
 
         # # contrast_loss = criterion(logits, labels)*0.01
 
-        loss = criterion(output_gcn[mask], target[mask])
-
+        loss = criterion(output_loss, target_loss) + criterion(output_pt, target)
 
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        output = output_gcn.max(1)[1]
+        output = output.max(1)[1]
         # output = output_pt_label
         n = coord.size(0)
         if args.multiprocessing_distributed:
@@ -368,18 +371,22 @@ def validate(val_loader, model, criterion, T_k, swDataset):
             output, output_pt, output_gcn = model([coord, feat, offset], T_k)
             # output_pt = model([coord, feat, offset], T_k)
 
+
+
         # output_pt = output_pt.max(1)[1]
         # loss = criterion(output, target) #  + criterion(output_gcn, output_pt)
-        output_pt_label = output_pt.max(1)[1]
+        # output_pt_label = output_pt.max(1)[1]
         # loss = criterion(output[mask], target[mask]) + criterion(output_gcn, output_pt_label)
-        loss = criterion(output_pt[mask], target[mask])
+        # loss = criterion(output_pt, target)
+        loss = criterion(output_gcn[mask], target[mask])
 
         # L1_reg = 0
         # for param in model.parameters():
         #     L1_reg += torch.sum(torch.abs(param))
         # loss += 0.001 * L1_reg  # lambda=0.001
 
-        output = output_gcn
+        # output = output_gcn
+        output = output.reshape(-1, output.shape[-1])
         output = output.max(1)[1]
 
         # output = output_pt_label

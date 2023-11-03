@@ -73,7 +73,7 @@ class swDataset(Dataset):
     def __init__(self, split='train', data_root='trainval', test_area=5, voxel_size=None, voxel_max=None, transform=None, shuffle_index=False, loop=1):
         super().__init__()
         self.split, self.voxel_size, self.transform, self.voxel_max, self.shuffle_index, self.loop = split, voxel_size, transform, voxel_max, shuffle_index, loop
-        trainset_percent = 0.3
+        trainset_percent = 0.8
         with open(os.path.join(data_root,"datalist_sw_t1.txt"),"r") as f:
             sub_list = f.readlines()
             sub_list = [ix[:-1].split() for ix in sub_list]
@@ -89,22 +89,14 @@ class swDataset(Dataset):
 
         if split == "train":
             self.sub_list = sub_list[:int(len(sub_list)*trainset_percent)]
-            # random.shuffle(self.sub_list)
-
-            # my_list = self.sub_list
-            # global pt_seg_values
-            # pt_seg_values = torch.zeros(len(my_list), 9391, 106).cuda()
-
         elif split == "val":
-            self.sub_list = sub_list[int(len(sub_list)*trainset_percent):int(len(sub_list)*trainset_percent)+23]
-            # self.sub_list = sub_list[int(len(sub_list)*trainset_percent):]
-        elif not split:
+            self.sub_list = sub_list[int(len(sub_list)*trainset_percent):]
+            # self.sub_list = sub_list[int(len(sub_list)*trainset_percent):int(len(sub_list)*trainset_percent)+23]
+        elif not split or split=='0.0':
             self.sub_list = sub_list
-            # my_list = self.sub_list
         else:
-            # self.sub_list = sub_list[int(len(sub_list)*trainset_percent):]
             self.sub_list = sub_list[int(len(sub_list)*float(split)):]
-            # my_list = self.sub_list
+
         self.label = np.load("/nfs2/users/zj/v1/Brainnetome/mesh_label_all_L_fsaverage10k.npy")
         self.label = small2small(self.label, "L")
         self.choice = np.loadtxt("/nfs2/users/zj/v1/Brainnetome/metric_index_L_fsaverage10k.txt").astype(int)
