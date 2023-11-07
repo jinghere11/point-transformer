@@ -115,7 +115,7 @@ def main_worker(gpu, ngpus_per_node, argss):
     if args.sync_bn:
        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     criterion = nn.CrossEntropyLoss(ignore_index=args.ignore_label).cuda()
-    # criterion_ntx = NTXentLoss(temperature = 0.1).cuda()
+    criterion_ntx = NTXentLoss(temperature = 0.1).cuda()
     # criterion_contrast = ContrastiveLoss().cuda()
 # 
     optimizer = torch.optim.SGD(model.parameters(), lr=args.base_lr, momentum=args.momentum, weight_decay=args.weight_decay)
@@ -205,7 +205,7 @@ def main_worker(gpu, ngpus_per_node, argss):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
-        loss_train, mIoU_train, mAcc_train, allAcc_train = train(train_loader, model, criterion, optimizer, epoch, T_k, swDataset)
+        loss_train, mIoU_train, mAcc_train, allAcc_train = train(train_loader, model, criterion, criterion_ntx, optimizer, epoch, T_k, swDataset)
         scheduler.step()
         epoch_log = epoch + 1
         if main_process():
@@ -219,7 +219,7 @@ def main_worker(gpu, ngpus_per_node, argss):
             if args.data_name == 'shapenet':
                 raise NotImplementedError()
             else:
-                loss_val, mIoU_val, mAcc_val, allAcc_val = validate(val_loader, model, criterion, T_k, swDataset)
+                loss_val, mIoU_val, mAcc_val, allAcc_val = validate(val_loader, model, criterion, criterion_ntx, T_k, swDataset)
 
             if main_process():
                 writer.add_scalar('loss_val', loss_val, epoch_log)
@@ -229,8 +229,14 @@ def main_worker(gpu, ngpus_per_node, argss):
                 is_best = mIoU_val > best_iou
                 best_iou = max(best_iou, mIoU_val)
 
-        if (epoch_log % args.save_freq == 0) and main_process():
+        if epoch == args.epochs-1 and main_process():
             filename = args.save_path + '/model'+'/model_last.pth'
+            logger.info('Saving checkpoint to: ' + filename)
+            torch.save({'epoch': epoch_log, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict(),
+                        'scheduler': scheduler.state_dict(), 'best_iou': best_iou, 'is_best': is_best}, filename)
+
+        if (epoch_log % args.save_freq == 0) and main_process():
+            filename = args.save_path + '/model'+'/model_'+str(epoch)+'.pth'
             logger.info('Saving checkpoint to: ' + filename)
             torch.save({'epoch': epoch_log, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict(),
                         'scheduler': scheduler.state_dict(), 'best_iou': best_iou, 'is_best': is_best}, filename)
@@ -245,8 +251,26 @@ def main_worker(gpu, ngpus_per_node, argss):
 def accuracy_func(preds, labels):
     return torch.mean((labels==preds).float())
 
+def calResHomo(atlas,bold,parcelRange):
+    netHomo = 0
+    netNum = 0
 
-def train(train_loader, model, criterion, optimizer, epoch, T_k, swDataset):
+    for i in parcelRange:
+        ratio = np.count_nonzero(atlas==i)
+        if ratio <2:
+            continue
+        tmp = bold[:,atlas==i]
+        averageCorr = np.mean(1-pdist(np.transpose(tmp),'correlation'))
+        if ~np.isnan(averageCorr):
+            netNum  += ratio
+            netHomo += averageCorr*ratio
+    if netNum == 0:
+        import pdb
+        pdb.set_trace()
+    return netHomo/netNum
+
+
+def train(train_loader, model, criterion, criterion_ntx, optimizer, epoch, T_k, swDataset):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     loss_meter = AverageMeter()
@@ -258,11 +282,20 @@ def train(train_loader, model, criterion, optimizer, epoch, T_k, swDataset):
     end = time.time()
     max_iter = args.epochs * len(train_loader)
 
+    mask_order = torch.load("mask_order5.pt")
+
     for i, (coord, feat, target, mask, offset) in enumerate(train_loader):  # (n, 3), (n, c), (n), (b)
         data_time.update(time.time() - end)
         coord, feat, target, offset = coord.cuda(non_blocking=True), feat.cuda(non_blocking=True), target.cuda(non_blocking=True), offset.cuda(non_blocking=True)
 
+        shuffle_index=torch.randperm(len(mask_order))
+        mask_order_narrow = mask_order[:int(len(mask_order)*0.6)]
+        mask_order_narrow = torch.nonzero(mask_order_narrow).squeeze()
+
+
         output, output_pt, output_gcn = model([coord, feat, offset], T_k)
+
+
 
 
 
@@ -273,20 +306,45 @@ def train(train_loader, model, criterion, optimizer, epoch, T_k, swDataset):
         mask = torch.nonzero(mask).squeeze()
 
         # output_pt = output_pt.reshape(-1, output_pt.shape[-1])
-        # output_pt_label = output_pt.max(1)[1]
+        output_pt_label = output_pt.max(1)[1]
         # output_gcn_label = indices[:, 0]
         # mask_gcn = torch.nonzero((output_gcn_label == target)).squeeze()
 
-        output_loss = torch.median(output, dim=0)[0]
+        # output_loss = torch.median(output, dim=0)[0]
+        # output_loss = torch.mean(output, dim=0)
 
-        output = output.reshape(-1, output.shape[-1])
-        # output_loss_pt = torch.mean(output_pt.reshape([args.batch_size, 9391, 106]), dim=0)
-        target_loss = target[:9391]
+        # output = output.reshape(-1, output.shape[-1])
+        # output_loss_pt = torch.median(output_pt.reshape([args.batch_size, 9391, 106]), dim=0)[0]
+        # output_loss_gcn = torch.median(output_gcn.reshape([args.batch_size, 9391, 106]), dim=0)[0]
+        # target_loss = target[:args.resolution]
         # loss = criterion(output_loss_pt, target_loss)
 
         # # contrast_loss = criterion(logits, labels)*0.01
 
-        loss = criterion(output_loss, target_loss) + criterion(output_pt, target)
+        # loss = criterion(output_loss[mask_order_narrow], target_loss[mask_order_narrow]) + criterion(output_pt, target)+ criterion(output_gcn, target)*0.5
+        # if epoch < 1:
+        #     loss = criterion(output, target) + criterion(output_gcn, target)
+        # else:
+        #     loss = criterion(output, target)*0.01 + criterion(output_pt, target)
+
+
+
+
+        if epoch < 1:
+            loss = criterion(output[mask], target[mask]) + criterion(output_gcn[mask], target[mask]) + criterion(output_pt, target)
+        # elif 3 <= epoch < 12:
+        #     confidence_coeff = sorted[:, 0] / sorted[:, 1]
+        #     mask_gcn = torch.nonzero((output_gcn_label == target) * (confidence_coeff >= 1.2)).squeeze() 
+        #     loss = criterion(output_gcn[mask_gcn], target[mask_gcn])*len(target)/len(mask_gcn)
+        # elif 5<=epoch<16:
+        #     loss = criterion(output_pt[mask_gcn], target[mask_gcn]) + criterion(output_gcn[mask], target[mask])
+        else:
+            # if not mask_gcn:
+            #     # confidence_coeff = sorted[:, 0] / sorted[:, 1]
+            #     mask_gcn = torch.nonzero((output_gcn_label == target)).squeeze()    #  * (confidence_coeff >= 1.2)
+            loss = criterion(output[mask], target[mask]) + criterion(output_pt, target)  # + criterion(logits, labels)
+
+
 
 
         optimizer.zero_grad()
@@ -351,7 +409,7 @@ def train(train_loader, model, criterion, optimizer, epoch, T_k, swDataset):
     return loss_meter.avg, mIoU, mAcc, allAcc
 
 
-def validate(val_loader, model, criterion, T_k, swDataset):
+def validate(val_loader, model, criterion, criterion_ntx, T_k, swDataset):
     if main_process():
         logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     batch_time = AverageMeter()

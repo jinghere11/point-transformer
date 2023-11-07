@@ -129,6 +129,9 @@ def test(model, test_loader, sub_list, criterion, names, T_k):
             pred_part, pred_pt, pred_gcn = model([coord_part, feat_part, offset_part], T_k)  # (n, k)
             # pred_pt = model([coord_part, feat_part, offset_part], T_k)  # (n, k)
 
+            # import pdb
+            # pdb.set_trace()
+
         torch.cuda.empty_cache()
 
         pred = pred_part

@@ -250,6 +250,7 @@ class PointTransformerSeg(nn.Module):
         self.gc0 = GraphConvolution(k, 64, cheb_order)
         self.gch = GraphConvolution(64, 64, cheb_order)
         self.gc1 = GraphConvolution(64, k, cheb_order)
+        self.gc_pt = GraphConvolution(k, k, 2)
         # self.pointnet_3d = PointNetDenseCls(k)
         self.enc1 = self._make_enc(block, planes[0], blocks[0], share_planes, stride=stride[0], nsample=nsample[0])  # N/1
         self.enc2 = self._make_enc(block, planes[1], blocks[1], share_planes, stride=stride[1], nsample=nsample[1])  # N/4
@@ -269,6 +270,12 @@ class PointTransformerSeg(nn.Module):
         self.conv = DepthwiseSeparableConv(2, 1)
         self.maxpool = nn.MaxPool1d(kernel_size=2, stride=1, padding=0)
         self.smooth = nn.Conv1d(k, k, kernel_size=3,stride=1,padding=1)
+        self.avgpool = nn.AvgPool1d(kernel_size=3,stride=1,padding=1)
+        self.smooth1 = nn.Sequential(nn.Conv1d(k, k, kernel_size=3,stride=1,padding=1), nn.BatchNorm1d(k), nn.ReLU(inplace=True),nn.Conv1d(k, k, kernel_size=3,stride=1,padding=1))
+        self.smooth2 = nn.Conv1d(k, k, kernel_size=3,stride=1,padding=1)
+        self.smooth_pt = nn.Conv1d(k, k, kernel_size=3,stride=1,padding=1)
+
+
 
     def _make_enc(self, block, planes, blocks, share_planes=8, stride=1, nsample=16):
         layers = []
@@ -290,6 +297,10 @@ class PointTransformerSeg(nn.Module):
     def forward(self, pxo, adj):
         p0, x0, o0 = pxo  # (n, 3), (n, c), (b)
 
+        adj_order1 = adj[1]
+
+
+
         global x_seed
         bs = x0.shape[0]//o0[0]
         x_seed = x0.clone()
@@ -308,7 +319,7 @@ class PointTransformerSeg(nn.Module):
             y += list_res[i]
         y = self.gc1(y, adj)
 
-        y = self.ln_gcn(y)
+        # y = self.ln_gcn(y)
 
         p1, x1, o1 = self.enc1([p0, x0, o0])
         p2, x2, o2 = self.enc2([p1, x1, o1])
@@ -322,14 +333,24 @@ class PointTransformerSeg(nn.Module):
         x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
         x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
         x = self.cls(x1)
+        # x = self.smooth_pt(x.reshape(-1, self.resolution, x.shape[-1]).transpose(-1,-2)).transpose(-1,-2).reshape(-1, x.shape[-1])
+
+        # x = x.reshape(-1, self.resolution, x.shape[-1]).transpose(-1,-2)
+
+        # x = torch.matmul(x, adj_order1).transpose(-1,-2)
+        # x = x.reshape(-1, x.shape[-1])
+
+
         x = self.ln_pt(x).squeeze()
 
         output_stack = torch.stack((x,y),dim=2)
         output_stack = self.maxpool(output_stack).squeeze()
-        output_stack = F.dropout(output_stack, 0.4, training=self.training)
-        # output_stack = self.smooth(output_stack.reshape(-1, self.resolution, output_stack.shape[-1]).transpose(-1,-2)).transpose(-1,-2)
-        output_stack = self.smooth(output_stack.reshape(-1, self.resolution, output_stack.shape[-1]).transpose(-1,-2)).transpose(-1,-2)
-        # output_stack = output_stack.reshape(-1, x.shape[-1])
+
+        # # output_stack = self.smooth(output_stack.reshape(-1, self.resolution, output_stack.shape[-1]).transpose(-1,-2)).transpose(-1,-2)
+        # output_stack0 = output_stack.reshape(-1, self.resolution, output_stack.shape[-1]).transpose(-1,-2)
+        # # output_stack = self.avgpool(output_stack0)
+        # output_stack = self.smooth(output_stack0)
+        # output_stack = output_stack.transpose(-1,-2)
 
         return output_stack, x, y
 
