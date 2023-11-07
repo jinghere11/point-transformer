@@ -321,7 +321,7 @@ class PointTransformerSeg(nn.Module):
 
         # y = self.ln_gcn(y)
 
-        p1, x1, o1 = self.enc1([p0, x0, o0])
+        p1, x1, o1 = self.enc1([p0, y, o0])
         p2, x2, o2 = self.enc2([p1, x1, o1])
         p3, x3, o3 = self.enc3([p2, x2, o2])
         p4, x4, o4 = self.enc4([p3, x3, o3])

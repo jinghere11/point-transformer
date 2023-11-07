@@ -22,7 +22,7 @@ TRAIN:
   batch_size: 4  # batch size for training
   batch_size_val: 2  # batch size for validation during training, memory and speed tradeoff
   base_lr: 0.1
-  epochs: 6
+  epochs: 20
   start_epoch: 0
   step_epoch: 15
   multiplier: 0.1
